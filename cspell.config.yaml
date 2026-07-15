@@ -1,0 +1,19 @@
+version: "0.2"
+ignorePaths: []
+dictionaryDefinitions: []
+dictionaries: []
+words:
+  - antfu
+  - drei
+  - esbuild
+  - GLTF
+  - moeru
+  - pixiv
+  - vite
+  - vitejs
+  - vitepress
+  - viverse
+  - yuru
+  - yurujs
+ignoreWords: []
+import: []

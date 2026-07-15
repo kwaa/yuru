@@ -1,0 +1,46 @@
+diff --git a/dist/simple.js b/dist/simple.js
+index a1404eb63556b355e2584ee8d6fbbff05382bb68..824ac49f4612fb01b462ed2e0c5497abf14c73cc 100644
+--- a/dist/simple.js
++++ b/dist/simple.js
+@@ -1,7 +1,7 @@
+ import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
+ import { RunAction, shouldJump, updateSimpleCharacterVelocity, updateSimpleCharacterRotation, IdleAnimationUrl, JumpDownAnimationUrl, JumpForwardAnimationUrl, JumpLoopAnimationUrl, JumpUpAnimationUrl, RunAnimationUrl, WalkAnimationUrl, } from '@pmndrs/viverse';
+ import { useFrame } from '@react-three/fiber';
+-import { Graph, GrapthState, Parallel, RunTimeline, Switch, SwitchCase, timePassed } from '@react-three/timeline';
++import { Graph, GraphState, Parallel, RunTimeline, Switch, SwitchCase, timePassed } from '@react-three/timeline';
+ import { forwardRef, Suspense, useImperativeHandle, useRef } from 'react';
+ import { LoopOnce, Vector3 } from 'three';
+ import { CharacterAnimationAction } from './animation.js';
+@@ -42,17 +42,17 @@ function SimpleCharacterModel({ children, model: modelOptions, movement, physics
+         : modelOptions);
+     const lastJumpTimeRef = useRef(-Infinity);
+     useFrame((state, delta) => updateSimpleCharacterRotation(delta, physics, state.camera, model, animation));
+-    return (_jsx(_Fragment, { children: _jsxs(CharacterModelProvider, { model: model, children: [_jsx(RunTimeline, { children: _jsxs(Graph, { enterState: "move", children: [_jsx(GrapthState, { name: "move", transitionTo: {
++    return (_jsx(_Fragment, { children: _jsxs(CharacterModelProvider, { model: model, children: [_jsx(RunTimeline, { children: _jsxs(Graph, { enterState: "move", children: [_jsx(GraphState, { name: "move", transitionTo: {
+                                     jumpStart: {
+                                         whenUpdate: () => shouldJump(physics, lastJumpTimeRef.current),
+                                     },
+                                     jumpLoop: { whenUpdate: () => !physics.isGrounded },
+-                                }, children: _jsxs(Switch, { children: [_jsx(SwitchCase, { index: 0, condition: () => physics.inputVelocity.lengthSq() === 0, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.idle, fadeDuration: animation?.crossFadeDuration, url: IdleAnimationUrl }) }) }), movement?.run != false && (_jsx(SwitchCase, { index: 1, condition: () => RunAction.get(), children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.run, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.8, url: RunAnimationUrl }) }) })), movement?.walk != false && (_jsx(SwitchCase, { index: 2, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.walk, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.5, url: WalkAnimationUrl }) }) })), _jsx(SwitchCase, { index: 3, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.idle, fadeDuration: animation?.crossFadeDuration, url: IdleAnimationUrl }) }) })] }) }), _jsx(GrapthState, { name: "jumpStart", transitionTo: {
++                                }, children: _jsxs(Switch, { children: [_jsx(SwitchCase, { index: 0, condition: () => physics.inputVelocity.lengthSq() === 0, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.idle, fadeDuration: animation?.crossFadeDuration, url: IdleAnimationUrl }) }) }), movement?.run != false && (_jsx(SwitchCase, { index: 1, condition: () => RunAction.get(), children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.run, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.8, url: RunAnimationUrl }) }) })), movement?.walk != false && (_jsx(SwitchCase, { index: 2, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.walk, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.5, url: WalkAnimationUrl }) }) })), _jsx(SwitchCase, { index: 3, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.idle, fadeDuration: animation?.crossFadeDuration, url: IdleAnimationUrl }) }) })] }) }), _jsx(GraphState, { name: "jumpStart", transitionTo: {
+                                     jumpDown: { whenUpdate: () => !physics.isGrounded },
+                                     finally: () => (RunAction.get() ? 'jumpForward' : 'jumpUp'),
+-                                }, children: _jsx(Parallel, { type: "race", children: _jsxs(Suspense, { fallback: null, children: [_jsx(CharacterAnimationAction, { ...animation?.jumpUp, fadeDuration: animation?.crossFadeDuration ?? 0.1, until: () => timePassed(0.2, 'seconds'), update: () => void physics.inputVelocity.multiplyScalar(0.3), paused: true, url: JumpUpAnimationUrl }), _jsx(CharacterAnimationAction, { ...animation?.jumpForward, fadeDuration: animation?.crossFadeDuration ?? 0.1, paused: true, url: JumpForwardAnimationUrl })] }) }) }), _jsx(GrapthState, { name: "jumpLoop", transitionTo: {
++                                }, children: _jsx(Parallel, { type: "race", children: _jsxs(Suspense, { fallback: null, children: [_jsx(CharacterAnimationAction, { ...animation?.jumpUp, fadeDuration: animation?.crossFadeDuration ?? 0.1, until: () => timePassed(0.2, 'seconds'), update: () => void physics.inputVelocity.multiplyScalar(0.3), paused: true, url: JumpUpAnimationUrl }), _jsx(CharacterAnimationAction, { ...animation?.jumpForward, fadeDuration: animation?.crossFadeDuration ?? 0.1, paused: true, url: JumpForwardAnimationUrl })] }) }) }), _jsx(GraphState, { name: "jumpLoop", transitionTo: {
+                                     jumpDown: { whenUpdate: () => physics.isGrounded },
+-                                }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpLoop, fadeDuration: animation?.crossFadeDuration, url: JumpLoopAnimationUrl }) }) }), _jsx(GrapthState, { name: "jumpUp", transitionTo: {
++                                }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpLoop, fadeDuration: animation?.crossFadeDuration, url: JumpLoopAnimationUrl }) }) }), _jsx(GraphState, { name: "jumpUp", transitionTo: {
+                                     jumpDown: {
+                                         whenUpdate: (_, _clock, actionTime) => actionTime > 0.3 && physics.isGrounded,
+                                     },
+@@ -60,8 +60,8 @@ function SimpleCharacterModel({ children, model: modelOptions, movement, physics
+                                 }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpUp, fadeDuration: animation?.crossFadeDuration, loop: LoopOnce, init: () => {
+                                             lastJumpTimeRef.current = performance.now() / 1000;
+                                             physics.applyVelocity(new Vector3(0, (typeof movement?.jump === 'object' ? movement?.jump.speed : undefined) ?? 8, 0));
+-                                        }, url: JumpUpAnimationUrl }) }) }), _jsx(GrapthState, { name: "jumpForward", transitionTo: { finally: () => (physics.isGrounded ? 'move' : 'jumpLoop') }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpForward, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.9, init: () => {
++                                        }, url: JumpUpAnimationUrl }) }) }), _jsx(GraphState, { name: "jumpForward", transitionTo: { finally: () => (physics.isGrounded ? 'move' : 'jumpLoop') }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpForward, fadeDuration: animation?.crossFadeDuration, scaleTime: 0.9, init: () => {
+                                             lastJumpTimeRef.current = performance.now() / 1000;
+                                             physics.applyVelocity(new Vector3(0, 8, 0));
+-                                        }, loop: LoopOnce, url: JumpForwardAnimationUrl }) }) }), _jsx(GrapthState, { name: "jumpDown", transitionTo: { finally: 'move' }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpDown, fadeDuration: animation?.crossFadeDuration, until: () => timePassed(150, 'milliseconds'), loop: LoopOnce, url: JumpDownAnimationUrl }) }) })] }) }), _jsx("primitive", { object: model.scene }), children] }) }));
++                                        }, loop: LoopOnce, url: JumpForwardAnimationUrl }) }) }), _jsx(GraphState, { name: "jumpDown", transitionTo: { finally: 'move' }, children: _jsx(Suspense, { fallback: null, children: _jsx(CharacterAnimationAction, { ...animation?.jumpDown, fadeDuration: animation?.crossFadeDuration, until: () => timePassed(150, 'milliseconds'), loop: LoopOnce, url: JumpDownAnimationUrl }) }) })] }) }), _jsx("primitive", { object: model.scene }), children] }) }));
+ }

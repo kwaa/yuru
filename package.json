@@ -1,0 +1,24 @@
+{
+  "name": "@yurujs/workspace",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "packageManager": "pnpm@11.13.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -F @yurujs/example-vrm dev",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@antfu/eslint-config": "catalog:",
+    "@eslint-react/eslint-plugin": "catalog:",
+    "@moeru/eslint-config": "catalog:",
+    "@moeru/tsconfig": "catalog:",
+    "@types/node": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "eslint": "catalog:",
+    "eslint-plugin-react-refresh": "catalog:",
+    "pkgroll": "catalog:",
+    "vite": "catalog:"
+  }
+}

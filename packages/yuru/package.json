@@ -1,0 +1,35 @@
+{
+  "name": "yuru",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/kwaa/yuru",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kwaa/yuru.git",
+    "directory": "packages/yuru"
+  },
+  "bugs": "https://github.com/moeru-ai/xsai/issues",
+  "sideEffects": false,
+  "exports": "./src/index.ts",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./package.json": "./package.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "scripts": {
+    "build": "pkgroll"
+  },
+  "dependencies": {
+  }
+}

@@ -1,1 +1,5 @@
-# yuru
+# Yuru
+
+## License
+
+[MIT](./LICENSE.md)

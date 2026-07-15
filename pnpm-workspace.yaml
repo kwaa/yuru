@@ -1,0 +1,39 @@
+shellEmulator: true
+
+trustPolicy: no-downgrade
+
+packages:
+  - docs
+  - examples/*
+  - packages/*
+
+allowBuilds:
+  esbuild: false
+
+patchedDependencies:
+  '@react-three/viverse@0.2.28': patches/@react-three__viverse@0.2.28.patch
+
+catalog:
+  '@antfu/eslint-config': ^9.1.0
+  '@eslint-react/eslint-plugin': ^5.9.2
+  '@moeru/eslint-config': 0.1.0-beta.19
+  '@moeru/tsconfig': 0.1.0-beta.19
+  '@pixiv/three-vrm': ^3.5.5
+  '@react-three/drei': ^10.7.7
+  '@react-three/fiber': ^9.6.1
+  '@react-three/handle': ^6.6.30
+  '@react-three/viverse': ^0.2.28
+  '@react-three/xr': ^6.6.30
+  '@types/node': ^26.1.1
+  '@types/react': ^19.2.17
+  '@types/react-dom': ^19.2.3
+  '@types/three': ^0.185.1
+  '@vitejs/plugin-react': ^6.0.3
+  eslint: ^10.5.0
+  eslint-plugin-react-refresh: ^0.5.3
+  foxact: ^0.3.8
+  pkgroll: ^2.27.1
+  react: ^19.2.7
+  react-dom: ^19.2.7
+  three: ^0.185.1
+  vite: ^8.1.4

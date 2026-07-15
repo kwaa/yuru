@@ -1,0 +1,28 @@
+{
+  "name": "@yurujs/example-vrm",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "scripts": {
+    "build": "tsc -b ../../tsconfig.app.json && vite build",
+    "dev": "vite",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@pixiv/three-vrm": "catalog:",
+    "@react-three/drei": "catalog:",
+    "@react-three/fiber": "catalog:",
+    "@react-three/handle": "catalog:",
+    "@react-three/viverse": "catalog:",
+    "@react-three/xr": "catalog:",
+    "foxact": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "three": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@types/three": "catalog:"
+  }
+}
