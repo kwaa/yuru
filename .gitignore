@@ -23,3 +23,6 @@ dist-ssr
 
 docs/.vitepress/cache
 docs/.vitepress/dist
+
+# direnv
+.direnv

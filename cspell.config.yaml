@@ -4,11 +4,15 @@ dictionaryDefinitions: []
 dictionaries: []
 words:
   - antfu
+  - direnv
   - drei
   - esbuild
   - GLTF
+  - kwaa
   - moeru
+  - nixpkgs
   - pixiv
+  - pkgs
   - vite
   - vitejs
   - vitepress
