@@ -25,6 +25,7 @@ const body = world.addBody({
     positions: new Float32Array([0, 1, 0, 1, 1, 0, 0, 0, 0]),
   },
   selfCollision: true,
+  tethers: true,
 })
 
 await world.step(1 / 60)
@@ -46,6 +47,8 @@ There is no string-based backend selector and no implicit backend switch.
 
 - Fixed-step accumulation with bounded catch-up.
 - Stretch, bend-distance, and area constraints.
+- Geodesic long-range tethers from dynamic particles to connected pins. They
+  default on when pins exist and can be disabled with `tethers: false`.
 - Vertex/triangle and edge/edge self- and inter-cloth collision.
 - Ordered garment layers with an optional axis-projected contact normal for
   inner/body, simulated garment, and outer-garment relationships.
@@ -53,6 +56,8 @@ There is no string-based backend selector and no implicit backend switch.
   correction for robust self- and inter-layer collision.
 - Connected-particle velocity damping plus bounded inelastic contact friction.
 - Sphere, capsule, plane, rounded-box, and triangle-mesh colliders.
+- Continuous particle collision against moving spheres and capsules in the
+  high-quality preset. Other collider and cloth-contact paths remain discrete.
 - Friction, wind/aerodynamic forces, configurable force fields, and volume grabs.
 - Low, medium, and high quality presets.
 

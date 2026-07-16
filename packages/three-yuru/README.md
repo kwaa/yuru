@@ -53,6 +53,9 @@ coat edge. Individual leg capsules are fitted inside the rest-pose clearance;
 a narrow vertical center proxy prevents panels collapsing between the legs,
 while the broad horizontal pelvis proxy remains omitted. Low-confidence
 results return `needsConfiguration` instead of simulating an unsafe candidate.
+The automatic VRM path also enables topology-aware tethers from skirt particles
+to the animated waist boundary to limit accumulated panel stretch without
+resisting folds that move closer to the waist.
 
 ## TSL/WebGPU
 

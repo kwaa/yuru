@@ -209,6 +209,9 @@ export class YuruController {
     delete clothOptions.meshes
     if (clothOptions.materials == null || clothOptions.materials.length === 0)
       clothOptions.materials = [VRM_CLOTH_MATERIAL]
+    // Character cloth benefits from a long-range link to the animated waist:
+    // local stretch constraints alone accumulate error down long skirt panels.
+    clothOptions.tethers ??= true
     const threshold = options.confidenceThreshold ?? 0.55
     if (options.meshes != null) {
       this.cloth = options.meshes.map(mesh => world.attachCloth(mesh, clothOptions))

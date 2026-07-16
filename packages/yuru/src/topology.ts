@@ -3,6 +3,15 @@ import { distance } from './math.js'
 export const BEND_EDGE = 1
 export const STRETCH_EDGE = 0
 
+export interface TetherTopology {
+  /** Pinned anchor for each generated tether. */
+  anchors: Uint32Array
+  /** Maximum geodesic distance from the corresponding anchor. */
+  lengths: Float32Array
+  /** Dynamic particle affected by each tether. */
+  particles: Uint32Array
+}
+
 export interface Topology {
   /** CSR adjacency: neighbors for particle i are adjacency[offsets[i]..offsets[i + 1]]. */
   adjacency: Uint32Array
@@ -142,3 +151,111 @@ export const buildTopology = (positions: Float32Array, indices: Uint16Array | Ui
     triangleRestAreas,
   }
 }
+
+/**
+ * Cooks one geodesic tether per dynamic particle using a multi-source shortest
+ * path from all connected pinned particles. Disconnected unpinned islands are
+ * intentionally left untethered.
+ */
+/* eslint-disable sonarjs/cognitive-complexity -- Cooking combines heap traversal and compact typed-array output. */
+export const buildTethers = (
+  positions: Float32Array,
+  inverseMasses: Float32Array,
+  topology: Topology,
+): TetherTopology => {
+  const particleCount = inverseMasses.length
+  const distances = new Float64Array(particleCount).fill(Number.POSITIVE_INFINITY)
+  const nearestAnchors = new Uint32Array(particleCount).fill(0xFFFF_FFFF)
+  const heapDistances: number[] = []
+  const heapParticles: number[] = []
+
+  const push = (particle: number, pathDistance: number): void => {
+    let index = heapDistances.length
+    heapDistances.push(pathDistance)
+    heapParticles.push(particle)
+    while (index > 0) {
+      const parent = (index - 1) >> 1
+      if (heapDistances[parent] <= pathDistance)
+        break
+      heapDistances[index] = heapDistances[parent]
+      heapParticles[index] = heapParticles[parent]
+      index = parent
+    }
+    heapDistances[index] = pathDistance
+    heapParticles[index] = particle
+  }
+
+  // eslint-disable-next-line sonarjs/function-return-type -- An empty heap intentionally has no item.
+  const pop = (): readonly [particle: number, pathDistance: number] | undefined => {
+    if (heapDistances.length === 0)
+      return undefined
+    const particle = heapParticles[0]
+    const pathDistance = heapDistances[0]
+    const lastDistance = heapDistances.pop()!
+    const lastParticle = heapParticles.pop()!
+    if (heapDistances.length > 0) {
+      let index = 0
+      while (true) {
+        const left = index * 2 + 1
+        if (left >= heapDistances.length)
+          break
+        const right = left + 1
+        const child = right < heapDistances.length && heapDistances[right] < heapDistances[left] ? right : left
+        if (heapDistances[child] >= lastDistance)
+          break
+        heapDistances[index] = heapDistances[child]
+        heapParticles[index] = heapParticles[child]
+        index = child
+      }
+      heapDistances[index] = lastDistance
+      heapParticles[index] = lastParticle
+    }
+    return [particle, pathDistance]
+  }
+
+  for (let particle = 0; particle < particleCount; particle++) {
+    if (inverseMasses[particle] !== 0)
+      continue
+    distances[particle] = 0
+    nearestAnchors[particle] = particle
+    push(particle, 0)
+  }
+
+  for (let item = pop(); item != null; item = pop()) {
+    const [particle, pathDistance] = item
+    if (pathDistance !== distances[particle])
+      continue
+    const start = topology.adjacencyOffsets[particle]
+    const end = topology.adjacencyOffsets[particle + 1]
+    for (let index = start; index < end; index++) {
+      const neighbor = topology.adjacency[index]
+      const candidate = pathDistance + distance(positions, particle, neighbor)
+      const anchor = nearestAnchors[particle]
+      if (candidate > distances[neighbor] || (candidate === distances[neighbor] && anchor >= nearestAnchors[neighbor]))
+        continue
+      distances[neighbor] = candidate
+      nearestAnchors[neighbor] = anchor
+      push(neighbor, candidate)
+    }
+  }
+
+  let tetherCount = 0
+  for (let particle = 0; particle < particleCount; particle++) {
+    if (inverseMasses[particle] !== 0 && Number.isFinite(distances[particle]))
+      tetherCount++
+  }
+  const anchors = new Uint32Array(tetherCount)
+  const lengths = new Float32Array(tetherCount)
+  const particles = new Uint32Array(tetherCount)
+  let tether = 0
+  for (let particle = 0; particle < particleCount; particle++) {
+    if (inverseMasses[particle] === 0 || !Number.isFinite(distances[particle]))
+      continue
+    anchors[tether] = nearestAnchors[particle]
+    lengths[tether] = distances[particle]
+    particles[tether] = particle
+    tether++
+  }
+  return { anchors, lengths, particles }
+}
+/* eslint-enable sonarjs/cognitive-complexity */

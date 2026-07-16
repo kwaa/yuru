@@ -116,6 +116,103 @@ describe('clothWorld', () => {
     world.dispose()
   })
 
+  it('uses geodesic tethers to cap distance from connected pinned particles', async () => {
+    const world = createClothWorld({
+      fixedDelta: 1 / 60,
+      gravity: [0, -14_400, 0],
+      quality: { collisionIterations: 0, substeps: 1 },
+      speedLimit: 'unlimited',
+    })
+    const body = world.addBody({
+      materials: [{ bendCompliance: 1e6, shearCompliance: 1e6, stretchCompliance: 1e6 }],
+      mesh: {
+        indices: new Uint16Array([0, 2, 1, 1, 2, 3]),
+        inverseMasses: new Float32Array([0, 0, 1, 1]),
+        positions: new Float32Array([
+          -0.5,
+          1,
+          0,
+          0.5,
+          1,
+          0,
+          -0.5,
+          0,
+          0,
+          0.5,
+          0,
+          0,
+        ]),
+      },
+      selfCollision: false,
+      tethers: true,
+    })
+
+    await world.step(1 / 60)
+
+    const positions = world.getPositions(body)
+    expect(Math.hypot(positions[6] - positions[0], positions[7] - positions[1], positions[8] - positions[2])).toBeLessThanOrEqual(1.000_001)
+    expect(Math.hypot(positions[9] - positions[3], positions[10] - positions[4], positions[11] - positions[5])).toBeLessThanOrEqual(1.000_001)
+    world.dispose()
+  })
+
+  it('sweeps fast particles against colliders instead of sampling their midpoint', async () => {
+    const createWorld = (continuousCollision: boolean) => createClothWorld({
+      fixedDelta: 1 / 60,
+      gravity: [14_400, 0, 0],
+      quality: { collisionEverySubsteps: 1, collisionIterations: 1, continuousCollision, substeps: 1 },
+      speedLimit: 'unlimited',
+    })
+    const simulate = async (continuousCollision: boolean): Promise<Float32Array> => {
+      const world = createWorld(continuousCollision)
+      const body = world.addBody({
+        materials: [{ thickness: 0.001 }],
+        mesh: {
+          indices: new Uint16Array([0, 1, 2]),
+          positions: new Float32Array([-2, -0.1, 0, -2, 0, 0, -2, 0.1, 0]),
+        },
+        selfCollision: false,
+      })
+      world.addCollider({ shape: { center: [0, 0, 0], radius: 0.5, type: 'sphere' } })
+      await world.step(1 / 60)
+      const result = world.getPositions(body).slice()
+      world.dispose()
+      return result
+    }
+
+    const discrete = await simulate(false)
+    const continuous = await simulate(true)
+    expect(discrete[3]).toBeGreaterThan(1)
+    expect(continuous[3]).toBeLessThan(-0.45)
+  })
+
+  it('carries contacted particles with a fast moving capsule', async () => {
+    const world = createClothWorld({
+      fixedDelta: 1 / 60,
+      gravity: [0, 0, 0],
+      quality: { collisionEverySubsteps: 1, collisionIterations: 1, continuousCollision: true, substeps: 1 },
+      speedLimit: 'unlimited',
+    })
+    const body = world.addBody({
+      materials: [{ thickness: 0.001 }],
+      mesh: {
+        indices: new Uint16Array([0, 1, 2]),
+        positions: new Float32Array([0, -0.1, 0, 0, 0, 0, 0, 0.1, 0]),
+      },
+      selfCollision: false,
+    })
+    const collider = world.addCollider({
+      shape: { end: [-2, 0, 1], radius: 0.5, start: [-2, 0, -1], type: 'capsule' },
+    })
+    world.updateCollider(collider, {
+      shape: { end: [2, 0, 1], radius: 0.5, start: [2, 0, -1], type: 'capsule' },
+    })
+
+    await world.step(1 / 60)
+
+    expect(world.getPositions(body)[3]).toBeGreaterThan(2.45)
+    world.dispose()
+  })
+
   it('accepts Three-compatible vector shapes without importing Three', async () => {
     const world = createClothWorld({
       gravity: { x: 0, y: 0, z: 0 },

@@ -24,6 +24,7 @@ export interface ClothMeshData {
   /** Optional material index for every triangle. */
   triangleMaterialIndices?: Uint16Array
 }
+
 /**
  * Numeric limits are expressed in meters per second. `automatic` derives a
  * per-substep displacement cap from cloth thickness and rest-particle spacing.
@@ -80,6 +81,8 @@ export interface ClothBodyDescriptor {
   materials?: readonly Partial<ClothMaterial>[]
   mesh: ClothMeshData
   selfCollision?: boolean
+  /** Long-range constraints to connected pinned particles. Defaults on when pins exist. */
+  tethers?: boolean
 }
 
 export interface ColliderDescriptor {

@@ -18,7 +18,7 @@ import type {
 } from './types.js'
 
 import { closestPointOnSegment, closestPointOnTriangle, EPSILON, inverseRotate, normalize, readQuat, readVec3, rotate } from './math.js'
-import { buildTopology, isWithinTwoRings, STRETCH_EDGE } from './topology.js'
+import { buildTethers, buildTopology, isWithinTwoRings, STRETCH_EDGE } from './topology.js'
 import { DEFAULT_CLOTH_MATERIAL, DEFAULT_COLLISION_FILTER } from './types.js'
 
 interface BodyState {
@@ -26,6 +26,7 @@ interface BodyState {
   collisionCellSize: number
   collisionLayer: number
   collisionLayerAxis?: Vec3
+  collisionPrevious: Float32Array
   collisionThickness: number
   filter: CollisionFilter
   id: BodyId
@@ -41,6 +42,9 @@ interface BodyState {
   previous: Float32Array
   selfCollision: boolean
   targets?: ParticleTargets
+  tethers?: {
+    topology: ReturnType<typeof buildTethers>
+  }
   topology: ReturnType<typeof buildTopology>
   triangleMaterialIndices?: Uint16Array
   velocityScratch: Float32Array
@@ -50,6 +54,7 @@ interface ColliderState {
   descriptor: ColliderDescriptor
   filter: CollisionFilter
   id: ColliderId
+  previousDescriptor: ColliderDescriptor
 }
 
 interface GrabState {
@@ -66,6 +71,14 @@ interface ParticleTargets {
   positions: Float32Array
 }
 
+interface SweptContactSample {
+  clearance: number
+  feature: Vec3
+  normal: Vec3
+  radius: number
+  segmentInterpolation: number
+}
+
 const mergeFilter = (filter?: Partial<CollisionFilter>): CollisionFilter => ({
   group: filter?.group ?? DEFAULT_COLLISION_FILTER.group,
   mask: filter?.mask ?? DEFAULT_COLLISION_FILTER.mask,
@@ -78,6 +91,19 @@ const mergeMaterial = (material?: Partial<ClothMaterial>): ClothMaterial => ({
   ...DEFAULT_CLOTH_MATERIAL,
   ...material,
 })
+
+const snapshotCollider = (descriptor: ColliderDescriptor): ColliderDescriptor => {
+  const shape = descriptor.shape
+  if (shape.type === 'sphere')
+    return { ...descriptor, shape: { ...shape, center: readVec3(shape.center) } }
+  if (shape.type === 'capsule') {
+    return {
+      ...descriptor,
+      shape: { ...shape, end: readVec3(shape.end), start: readVec3(shape.start) },
+    }
+  }
+  return descriptor
+}
 
 const materialForTriangle = (body: BodyState, triangle: number): ClothMaterial =>
   body.materials[body.triangleMaterialIndices?.[triangle] ?? 0] ?? body.materials[0]
@@ -220,6 +246,10 @@ export class CPUSolverBackend implements ClothBackend {
       ? descriptor.materials.map(mergeMaterial)
       : [mergeMaterial()]
     const topology = buildTopology(positions, mesh.indices)
+    const inverseMasses = mesh.inverseMasses?.slice() ?? new Float32Array(count).fill(1)
+    const hasPinnedParticles = inverseMasses.some(inverseMass => inverseMass === 0)
+    const hasDynamicParticles = inverseMasses.some(inverseMass => inverseMass !== 0)
+    const useTethers = (descriptor.tethers ?? hasPinnedParticles) && hasPinnedParticles && hasDynamicParticles
     const spacing = particleSpacing(topology)
     const thickness = Math.max(...materials.map(material => material.thickness))
     const id = this.nextBodyId++
@@ -228,12 +258,13 @@ export class CPUSolverBackend implements ClothBackend {
       collisionCellSize: collisionCellSize(spacing, materials),
       collisionLayer: descriptor.collisionLayer ?? 0,
       collisionLayerAxis: descriptor.collisionLayerAxis == null ? undefined : normalize(...readVec3(descriptor.collisionLayerAxis)),
+      collisionPrevious: positions.slice(),
       collisionThickness: thickness,
       filter: mergeFilter(descriptor.collisionFilter),
       id,
       indices: mesh.indices.slice(),
       initial: positions.slice(),
-      inverseMasses: mesh.inverseMasses?.slice() ?? new Float32Array(count).fill(1),
+      inverseMasses,
       label: descriptor.id,
       materials,
       maximumSelfCollisionDepenetration: Number.POSITIVE_INFINITY,
@@ -242,6 +273,9 @@ export class CPUSolverBackend implements ClothBackend {
       positions,
       previous: positions.slice(),
       selfCollision: descriptor.selfCollision ?? true,
+      tethers: !useTethers
+        ? undefined
+        : { topology: buildTethers(positions, inverseMasses, topology) },
       topology,
       triangleMaterialIndices: mesh.triangleMaterialIndices?.slice(),
       velocityScratch: new Float32Array(positions.length),
@@ -251,7 +285,12 @@ export class CPUSolverBackend implements ClothBackend {
 
   addCollider(descriptor: ColliderDescriptor): ColliderId {
     const id = this.nextColliderId++
-    this.colliders.set(id, { descriptor, filter: mergeFilter(descriptor.collisionFilter), id })
+    this.colliders.set(id, {
+      descriptor,
+      filter: mergeFilter(descriptor.collisionFilter),
+      id,
+      previousDescriptor: snapshotCollider(descriptor),
+    })
     return id
   }
 
@@ -328,6 +367,7 @@ export class CPUSolverBackend implements ClothBackend {
       throw new RangeError('Reset positions do not match the body particle count')
     body.positions.set(source)
     body.previous.set(source)
+    body.collisionPrevious.set(source)
   }
 
   setParticleTargets(id: BodyId, indices: Uint32Array, positions: Float32Array): void {
@@ -363,9 +403,20 @@ export class CPUSolverBackend implements ClothBackend {
         if (prediction != null)
           await prediction
         this.limitSelfCollisionSpeed(body, subDelta, collisionInterval, substeps, options.speedLimit)
+        this.solveTethers(body)
         this.solveDistanceConstraints(body, subDelta)
         this.solveAreaConstraints(body, subDelta)
         this.solveGrabs(body, subDelta)
+      }
+
+      // Swept contact is part of every solver substep. Deferring it to the
+      // more expensive self/inter-cloth collision interval creates a large
+      // carry correction when an animated capsule moves quickly.
+      if (options.quality.continuousCollision && options.quality.collisionIterations > 0) {
+        const fromFraction = substep / substeps
+        const toFraction = (substep + 1) / substeps
+        for (const body of this.bodies.values())
+          this.solveExternalColliders(body, true, fromFraction, toFraction)
       }
 
       // Always leave the rendered frame with fresh contacts, even when a
@@ -376,14 +427,17 @@ export class CPUSolverBackend implements ClothBackend {
           this.solveBodyCollisions(options.quality.maxCollisionCandidates)
           this.solveEdgeCollisions(options.quality.maxCollisionCandidates)
           for (const body of this.bodies.values())
-            this.solveExternalColliders(body, options.quality.continuousCollision)
+            this.solveExternalColliders(body, false, 0, 0)
         }
       }
       for (const body of this.bodies.values()) {
         this.applyTargets(body)
         this.applyLaplacianDamping(body, subDelta)
+        body.collisionPrevious.set(body.positions)
       }
     }
+    for (const collider of this.colliders.values())
+      collider.previousDescriptor = snapshotCollider(collider.descriptor)
   }
 
   updateCollider(id: ColliderId, descriptor: ColliderDescriptor): void {
@@ -683,6 +737,71 @@ export class CPUSolverBackend implements ClothBackend {
     const [axisX, axisY, axisZ] = normalize(...readVec3(field.axis))
     const tangent = normalize(axisY * dz - axisZ * dy, axisZ * dx - axisX * dz, axisX * dy - axisY * dx)
     return [tangent[0] * field.strength * scale, tangent[1] * field.strength * scale, tangent[2] * field.strength * scale]
+  }
+
+  // eslint-disable-next-line sonarjs/function-return-type -- Unsupported collider pairs intentionally have no sweep sample.
+  private sampleSweptContact(
+    collider: ColliderState,
+    globalTime: number,
+    position: Vec3,
+    thickness: number,
+  ): SweptContactSample | undefined {
+    const previousShape = collider.previousDescriptor.shape
+    const currentShape = collider.descriptor.shape
+    if (previousShape.type !== currentShape.type)
+      return undefined
+    if (previousShape.type === 'sphere' && currentShape.type === 'sphere') {
+      const previousCenter = readVec3(previousShape.center)
+      const currentCenter = readVec3(currentShape.center)
+      const feature: Vec3 = [
+        previousCenter[0] + (currentCenter[0] - previousCenter[0]) * globalTime,
+        previousCenter[1] + (currentCenter[1] - previousCenter[1]) * globalTime,
+        previousCenter[2] + (currentCenter[2] - previousCenter[2]) * globalTime,
+      ]
+      const radius = previousShape.radius + (currentShape.radius - previousShape.radius) * globalTime
+      const dx = position[0] - feature[0]
+      const dy = position[1] - feature[1]
+      const dz = position[2] - feature[2]
+      const separation = Math.hypot(dx, dy, dz)
+      return {
+        clearance: separation - radius - thickness,
+        feature,
+        normal: normalize(dx, dy, dz),
+        radius,
+        segmentInterpolation: 0,
+      }
+    }
+    if (previousShape.type === 'capsule' && currentShape.type === 'capsule') {
+      const previousStart = readVec3(previousShape.start)
+      const currentStart = readVec3(currentShape.start)
+      const previousEnd = readVec3(previousShape.end)
+      const currentEnd = readVec3(currentShape.end)
+      const start: Vec3 = [
+        previousStart[0] + (currentStart[0] - previousStart[0]) * globalTime,
+        previousStart[1] + (currentStart[1] - previousStart[1]) * globalTime,
+        previousStart[2] + (currentStart[2] - previousStart[2]) * globalTime,
+      ]
+      const end: Vec3 = [
+        previousEnd[0] + (currentEnd[0] - previousEnd[0]) * globalTime,
+        previousEnd[1] + (currentEnd[1] - previousEnd[1]) * globalTime,
+        previousEnd[2] + (currentEnd[2] - previousEnd[2]) * globalTime,
+      ]
+      const closest = closestPointOnSegment(...position, ...start, ...end)
+      const feature: Vec3 = [closest[0], closest[1], closest[2]]
+      const radius = previousShape.radius + (currentShape.radius - previousShape.radius) * globalTime
+      const dx = position[0] - feature[0]
+      const dy = position[1] - feature[1]
+      const dz = position[2] - feature[2]
+      const separation = Math.hypot(dx, dy, dz)
+      return {
+        clearance: separation - radius - thickness,
+        feature,
+        normal: normalize(dx, dy, dz),
+        radius,
+        segmentInterpolation: closest[3],
+      }
+    }
+    return undefined
   }
 
   private solveAreaConstraints(body: BodyState, delta: number): void {
@@ -1155,38 +1274,20 @@ export class CPUSolverBackend implements ClothBackend {
     }
   }
 
-  private solveExternalColliders(body: BodyState, continuous: boolean): void {
+  private solveExternalColliders(
+    body: BodyState,
+    continuous: boolean,
+    fromFraction: number,
+    toFraction: number,
+  ): void {
     for (const collider of this.colliders.values()) {
       if (!filtersCollide(body.filter, collider.filter))
         continue
       for (let particle = 0; particle < body.inverseMasses.length; particle++) {
         if (body.inverseMasses[particle] === 0)
           continue
-        if (continuous) {
-          const offset = particle * 3
-          const currentX = body.positions[offset]
-          const currentY = body.positions[offset + 1]
-          const currentZ = body.positions[offset + 2]
-          const previousX = body.previous[offset]
-          const previousY = body.previous[offset + 1]
-          const previousZ = body.previous[offset + 2]
-          const midpointX = (currentX + previousX) * 0.5
-          const midpointY = (currentY + previousY) * 0.5
-          const midpointZ = (currentZ + previousZ) * 0.5
-          body.positions[offset] = midpointX
-          body.positions[offset + 1] = midpointY
-          body.positions[offset + 2] = midpointZ
-          this.solveCollider(body, particle, collider.descriptor)
-          const correctionX = body.positions[offset] - midpointX
-          const correctionY = body.positions[offset + 1] - midpointY
-          const correctionZ = body.positions[offset + 2] - midpointZ
-          body.positions[offset] = currentX + correctionX
-          body.positions[offset + 1] = currentY + correctionY
-          body.positions[offset + 2] = currentZ + correctionZ
-          body.previous[offset] = previousX + correctionX
-          body.previous[offset + 1] = previousY + correctionY
-          body.previous[offset + 2] = previousZ + correctionZ
-        }
+        if (continuous)
+          this.solveSweptCollider(body, particle, collider, fromFraction, toFraction)
         this.solveCollider(body, particle, collider.descriptor)
       }
     }
@@ -1211,6 +1312,164 @@ export class CPUSolverBackend implements ClothBackend {
         body.positions[offset + 1] += (targetY - body.positions[offset + 1]) * scale
         body.positions[offset + 2] += (targetZ - body.positions[offset + 2]) * scale
       }
+    }
+  }
+
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- Sphere TOI and capsule conservative advancement share one contact response.
+  private solveSweptCollider(
+    body: BodyState,
+    particle: number,
+    collider: ColliderState,
+    fromFraction: number,
+    toFraction: number,
+  ): void {
+    const offset = particle * 3
+    const from: Vec3 = [
+      body.collisionPrevious[offset],
+      body.collisionPrevious[offset + 1],
+      body.collisionPrevious[offset + 2],
+    ]
+    const to: Vec3 = [body.positions[offset], body.positions[offset + 1], body.positions[offset + 2]]
+    const particleDx = to[0] - from[0]
+    const particleDy = to[1] - from[1]
+    const particleDz = to[2] - from[2]
+    const motionBound = this.sweptMotionBound(
+      collider,
+      fromFraction,
+      toFraction,
+      Math.hypot(particleDx, particleDy, particleDz),
+    )
+    if (motionBound < EPSILON)
+      return
+    const thickness = body.materials[0].thickness
+    let localTime = 0
+    let hit: SweptContactSample | undefined
+    const isSphere = collider.previousDescriptor.shape.type === 'sphere' && collider.descriptor.shape.type === 'sphere'
+    if (isSphere) {
+      const impact = this.sphereTimeOfImpact(collider, fromFraction, toFraction, from, to, thickness)
+      if (impact == null)
+        return
+      localTime = impact
+      hit = this.sampleSweptContact(collider, fromFraction + (toFraction - fromFraction) * localTime, [
+        from[0] + particleDx * localTime,
+        from[1] + particleDy * localTime,
+        from[2] + particleDz * localTime,
+      ], thickness)
+    }
+    else {
+      for (let iteration = 0; iteration < 20; iteration++) {
+        const globalTime = fromFraction + (toFraction - fromFraction) * localTime
+        const position: Vec3 = [
+          from[0] + particleDx * localTime,
+          from[1] + particleDy * localTime,
+          from[2] + particleDz * localTime,
+        ]
+        const sample = this.sampleSweptContact(collider, globalTime, position, thickness)
+        if (sample == null)
+          return
+        // A contact already present at the start belongs to the discrete
+        // depenetration path. Treating it as a fresh time of impact every
+        // substep repeatedly carries resting cloth and produces contact jitter.
+        if (iteration === 0 && sample.clearance <= 1e-6)
+          return
+        if (sample.clearance <= 1e-6) {
+          hit = sample
+          break
+        }
+        const advance = sample.clearance / motionBound * 0.9
+        if (advance < 1e-6) {
+          hit = sample
+          break
+        }
+        if (localTime + advance > 1)
+          return
+        localTime += advance
+      }
+    }
+    if (hit == null)
+      return
+
+    const finalPosition: Vec3 = [
+      from[0] + particleDx * localTime,
+      from[1] + particleDy * localTime,
+      from[2] + particleDz * localTime,
+    ]
+    const finalSample = this.sampleSweptContact(collider, toFraction, finalPosition, thickness)
+    if (finalSample == null)
+      return
+    let finalFeature = finalSample.feature
+    const previousShape = collider.previousDescriptor.shape
+    const currentShape = collider.descriptor.shape
+    if (previousShape.type === 'capsule' && currentShape.type === 'capsule') {
+      const previousStart = readVec3(previousShape.start)
+      const currentStart = readVec3(currentShape.start)
+      const previousEnd = readVec3(previousShape.end)
+      const currentEnd = readVec3(currentShape.end)
+      const start: Vec3 = [
+        previousStart[0] + (currentStart[0] - previousStart[0]) * toFraction,
+        previousStart[1] + (currentStart[1] - previousStart[1]) * toFraction,
+        previousStart[2] + (currentStart[2] - previousStart[2]) * toFraction,
+      ]
+      const end: Vec3 = [
+        previousEnd[0] + (currentEnd[0] - previousEnd[0]) * toFraction,
+        previousEnd[1] + (currentEnd[1] - previousEnd[1]) * toFraction,
+        previousEnd[2] + (currentEnd[2] - previousEnd[2]) * toFraction,
+      ]
+      const t = hit.segmentInterpolation
+      finalFeature = [
+        start[0] + (end[0] - start[0]) * t,
+        start[1] + (end[1] - start[1]) * t,
+        start[2] + (end[2] - start[2]) * t,
+      ]
+    }
+    else if (previousShape.type !== 'sphere' || currentShape.type !== 'sphere') {
+      return
+    }
+    const contactRadius = finalSample.radius + thickness
+    const targetX = finalFeature[0] + hit.normal[0] * contactRadius
+    const targetY = finalFeature[1] + hit.normal[1] * contactRadius
+    const targetZ = finalFeature[2] + hit.normal[2] * contactRadius
+    const correctionX = targetX - body.positions[offset]
+    const correctionY = targetY - body.positions[offset + 1]
+    const correctionZ = targetZ - body.positions[offset + 2]
+    body.positions[offset] = targetX
+    body.positions[offset + 1] = targetY
+    body.positions[offset + 2] = targetZ
+    body.previous[offset] += correctionX
+    body.previous[offset + 1] += correctionY
+    body.previous[offset + 2] += correctionZ
+    this.applyFriction(body, particle, ...hit.normal, collider.descriptor.friction ?? body.materials[0].kineticFriction)
+  }
+
+  private solveTethers(body: BodyState): void {
+    const tethers = body.tethers
+    if (tethers == null)
+      return
+    const { anchors, lengths, particles } = tethers.topology
+    for (let tether = 0; tether < particles.length; tether++) {
+      const particle = particles[tether]
+      const anchor = anchors[tether]
+      const particleOffset = particle * 3
+      const anchorOffset = anchor * 3
+      const dx = body.positions[particleOffset] - body.positions[anchorOffset]
+      const dy = body.positions[particleOffset + 1] - body.positions[anchorOffset + 1]
+      const dz = body.positions[particleOffset + 2] - body.positions[anchorOffset + 2]
+      const currentLength = Math.hypot(dx, dy, dz)
+      const maximumLength = lengths[tether]
+      if (currentLength <= maximumLength || currentLength < EPSILON)
+        continue
+      const particleWeight = body.inverseMasses[particle]
+      const anchorWeight = body.inverseMasses[anchor]
+      const denominator = particleWeight + anchorWeight
+      if (denominator < EPSILON)
+        continue
+      const correction = (currentLength - maximumLength) / (currentLength * denominator)
+      body.positions[particleOffset] -= dx * correction * particleWeight
+      body.positions[particleOffset + 1] -= dy * correction * particleWeight
+      body.positions[particleOffset + 2] -= dz * correction * particleWeight
+      body.positions[anchorOffset] += dx * correction * anchorWeight
+      body.positions[anchorOffset + 1] += dy * correction * anchorWeight
+      body.positions[anchorOffset + 2] += dz * correction * anchorWeight
     }
   }
 
@@ -1480,5 +1739,98 @@ export class CPUSolverBackend implements ClothBackend {
       triangleBody.previous[offset + 1] += velocityCorrectionY * scale
       triangleBody.previous[offset + 2] += velocityCorrectionZ * scale
     }
+  }
+
+  private sphereTimeOfImpact(
+    collider: ColliderState,
+    fromFraction: number,
+    toFraction: number,
+    from: Vec3,
+    to: Vec3,
+    thickness: number,
+  ): number | undefined {
+    const previousShape = collider.previousDescriptor.shape
+    const currentShape = collider.descriptor.shape
+    if (previousShape.type !== 'sphere' || currentShape.type !== 'sphere')
+      return undefined
+    const previousCenter = readVec3(previousShape.center)
+    const currentCenter = readVec3(currentShape.center)
+    const centerAt = (fraction: number): Vec3 => [
+      previousCenter[0] + (currentCenter[0] - previousCenter[0]) * fraction,
+      previousCenter[1] + (currentCenter[1] - previousCenter[1]) * fraction,
+      previousCenter[2] + (currentCenter[2] - previousCenter[2]) * fraction,
+    ]
+    const fromCenter = centerAt(fromFraction)
+    const toCenter = centerAt(toFraction)
+    const qx = from[0] - fromCenter[0]
+    const qy = from[1] - fromCenter[1]
+    const qz = from[2] - fromCenter[2]
+    const dx = to[0] - toCenter[0] - qx
+    const dy = to[1] - toCenter[1] - qy
+    const dz = to[2] - toCenter[2] - qz
+    const fromRadius = previousShape.radius
+      + (currentShape.radius - previousShape.radius) * fromFraction + thickness
+    const toRadius = previousShape.radius
+      + (currentShape.radius - previousShape.radius) * toFraction + thickness
+    const radiusDelta = toRadius - fromRadius
+    const a = dx * dx + dy * dy + dz * dz - radiusDelta * radiusDelta
+    const b = 2 * (qx * dx + qy * dy + qz * dz - fromRadius * radiusDelta)
+    const c = qx * qx + qy * qy + qz * qz - fromRadius * fromRadius
+    if (c <= 0)
+      return undefined
+    if (Math.abs(a) < EPSILON) {
+      if (Math.abs(b) < EPSILON)
+        return undefined
+      const root = -c / b
+      return root >= 0 && root <= 1 ? root : undefined
+    }
+    const discriminant = b * b - 4 * a * c
+    if (discriminant < 0)
+      return undefined
+    const squareRoot = Math.sqrt(discriminant)
+    const q = -0.5 * (b + (b < 0 ? -squareRoot : squareRoot))
+    const first = q / a
+    const second = Math.abs(q) < EPSILON ? Number.POSITIVE_INFINITY : c / q
+    const earliest = Math.min(first, second)
+    const latest = Math.max(first, second)
+    if (earliest >= 0 && earliest <= 1)
+      return earliest
+    return latest >= 0 && latest <= 1 ? latest : undefined
+  }
+
+  private sweptMotionBound(collider: ColliderState, fromFraction: number, toFraction: number, particleMotion: number): number {
+    const previousShape = collider.previousDescriptor.shape
+    const currentShape = collider.descriptor.shape
+    if (previousShape.type !== currentShape.type)
+      return particleMotion
+    const fraction = toFraction - fromFraction
+    if (previousShape.type === 'sphere' && currentShape.type === 'sphere') {
+      const previousCenter = readVec3(previousShape.center)
+      const currentCenter = readVec3(currentShape.center)
+      return particleMotion + Math.hypot(
+        currentCenter[0] - previousCenter[0],
+        currentCenter[1] - previousCenter[1],
+        currentCenter[2] - previousCenter[2],
+      ) * fraction + Math.abs(currentShape.radius - previousShape.radius) * fraction
+    }
+    if (previousShape.type === 'capsule' && currentShape.type === 'capsule') {
+      const previousStart = readVec3(previousShape.start)
+      const currentStart = readVec3(currentShape.start)
+      const previousEnd = readVec3(previousShape.end)
+      const currentEnd = readVec3(currentShape.end)
+      const startMotion = Math.hypot(
+        currentStart[0] - previousStart[0],
+        currentStart[1] - previousStart[1],
+        currentStart[2] - previousStart[2],
+      )
+      const endMotion = Math.hypot(
+        currentEnd[0] - previousEnd[0],
+        currentEnd[1] - previousEnd[1],
+        currentEnd[2] - previousEnd[2],
+      )
+      return particleMotion + Math.max(startMotion, endMotion) * fraction
+        + Math.abs(currentShape.radius - previousShape.radius) * fraction
+    }
+    return particleMotion
   }
 }

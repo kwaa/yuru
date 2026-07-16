@@ -39,16 +39,19 @@ const body = world.addBody({
     positions: new Float32Array([0, 1, 0, 1, 1, 0, 0, 0, 0]),
   },
   selfCollision: true,
+  tethers: true,
 })
 
 await world.step(1 / 60)
 world.getPositions(body)
 ```
 
-The CPU backend currently includes stretch, bend-distance and area constraints,
+The CPU backend currently includes stretch, bend-distance, area, and geodesic
+tether constraints,
 fixed-step accumulation, vertex/triangle and edge/edge self/inter-cloth
 collisions, sphere/capsule/plane/rounded-box/triangle-mesh colliders, friction,
-wind/aerodynamic forces, and volume grabs.
+wind/aerodynamic forces, volume grabs, and continuous particle collision against
+moving spheres and capsules in the high-quality preset.
 
 ## Three and WebGPU
 
@@ -85,7 +88,8 @@ inside a merged `Body` mesh. For merged meshes it finds vertices weighted to
 secondary skirt/coat/clothing bones, extracts only matching triangles, keeps the
 rest of the original skinned mesh visible, and creates height-scaled skeletal
 capsule colliders for a narrow vertical body center and the individual legs. If
-confidence remains low it returns
+The extracted skirt is tethered to its animated waist boundary by mesh
+connectivity rather than spatial proximity. If confidence remains low it returns
 `needsConfiguration` instead of simulating a body, face, or hair by accident.
 
 The Vitest suite loads the included official `AvatarSample_B.vrm` and verifies
