@@ -55,7 +55,10 @@ while the broad horizontal pelvis proxy remains omitted. Low-confidence
 results return `needsConfiguration` instead of simulating an unsafe candidate.
 The automatic VRM path also enables topology-aware tethers from skirt particles
 to the animated waist boundary to limit accumulated panel stretch without
-resisting folds that move closer to the waist.
+resisting folds that move closer to the waist. It derives per-particle motion
+limits from simulation-mesh spacing and updates their target centers from the
+skinned proxy each frame, preventing side and rear panels from collapsing into
+the legs while preserving local cloth motion.
 
 ## TSL/WebGPU
 

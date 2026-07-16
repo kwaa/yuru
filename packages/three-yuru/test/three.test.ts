@@ -83,6 +83,51 @@ describe('three mesh binding', () => {
     proxy.geometry.dispose()
     material.dispose()
   })
+
+  it('uses an explicit proxy map for coincident visual vertices', async () => {
+    const geometry = new BufferGeometry()
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array([
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      1,
+      0,
+      -1,
+      0,
+      0,
+      0,
+      -1,
+      0,
+    ]), 3))
+    geometry.setIndex([0, 2, 3, 1, 4, 5])
+    const proxyGeometry = geometry.clone()
+    proxyGeometry.userData.yuruVisualVertexMap = Uint32Array.from([0, 1, 2, 3, 4, 5])
+    const material = new MeshBasicMaterial()
+    const display = new Mesh(geometry, material)
+    const proxy = new Mesh(proxyGeometry, material)
+    const world = createThreeYuruWorld({ gravity: [0, -9.81, 0] })
+    world.attachCloth(display, {
+      inverseMasses: Float32Array.from([0, 1, 0, 0, 1, 1]),
+      pin: false,
+      simulationMesh: proxy,
+    })
+
+    await world.update(1 / 60)
+
+    expect(display.geometry.getAttribute('position').getY(0)).toBe(0)
+    expect(display.geometry.getAttribute('position').getY(1)).toBeLessThan(0)
+    world.dispose()
+    geometry.dispose()
+    proxyGeometry.dispose()
+    material.dispose()
+  })
 })
 
 describe('three collider conversion', () => {

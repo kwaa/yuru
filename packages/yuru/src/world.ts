@@ -140,6 +140,11 @@ export class ClothWorld {
     this.gravity = readVec3(gravity)
   }
 
+  setMotionConstraintTargets(id: BodyId, positions: Float32Array): void {
+    this.assertActive()
+    this.backend.setMotionConstraintTargets(id, positions)
+  }
+
   setParticleTargets(id: BodyId, indices: Uint32Array, positions: Float32Array): void {
     this.assertActive()
     this.backend.setParticleTargets(id, indices, positions)

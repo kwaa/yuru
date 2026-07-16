@@ -6,6 +6,7 @@ const CLOTH_BONE_NAME = /skirt|coat.?skirt|dress|robe|cape|cloth|sleeve|hem|apro
 const RIGID_CLOTHING_NAME = /shoe|boot|heel|sole|glove|button|buckle/i
 const WELD_PRECISION = 100_000
 const COLLISION_NEIGHBORHOOD_MINIMUM = 0.03
+export const YURU_VISUAL_VERTEX_MAP = 'yuruVisualVertexMap'
 
 export interface SkinnedClothSelection {
   clothBoneNames: readonly string[]
@@ -167,7 +168,11 @@ export const weldSkinnedSimulationGeometry = (source: BufferGeometry): BufferGeo
 
   const result = new BufferGeometry()
   result.name = `${source.name}_YuruSimulationProxy`
-  result.userData = { ...source.userData }
+  // Preserve the exact source-to-proxy correspondence. Position-only nearest
+  // point binding is ambiguous at UV/material seams and at coincident vertices
+  // with different skin weights; once those proxy particles separate it can
+  // fold an otherwise valid render triangle onto the wrong side of a garment.
+  result.userData = { ...source.userData, [YURU_VISUAL_VERTEX_MAP]: oldToNew }
   copyGeometryVertices(source, sourceVertices, result)
   result.setIndex(new BufferAttribute(
     sourceVertices.length > 0xFFFF ? Uint32Array.from(indices) : Uint16Array.from(indices),
@@ -446,11 +451,11 @@ export class ExtractedSkinnedCloth {
     const selected = new Set(triangles)
     const clothGeometry = subsetGeometry(source.geometry, selected, true)
     const simulationGeometry = weldSkinnedSimulationGeometry(clothGeometry)
-    const collisionTriangles = collisionNeighborhood(source.geometry, selected)
+    const collisionTriangles = collisionNeighborhood(this.originalGeometry, selected)
     const outerCollisionGeometry = collisionTriangles.size === 0
       ? undefined
-      : collisionGeometry(source.geometry, collisionTriangles)
-    this.remainderGeometry = subsetGeometry(source.geometry, selected, false)
+      : collisionGeometry(this.originalGeometry, collisionTriangles)
+    this.remainderGeometry = subsetGeometry(this.originalGeometry, selected, false)
     source.geometry = this.remainderGeometry
     source.updateMorphTargets()
 

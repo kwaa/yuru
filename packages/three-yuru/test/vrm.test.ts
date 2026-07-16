@@ -2,7 +2,8 @@ import type { VRM } from '@pixiv/three-vrm'
 
 import { readFile } from 'node:fs/promises'
 
-import { VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
+import { VRMHumanBoneName, VRMLoaderPlugin, VRMUtils } from '@pixiv/three-vrm'
+import { Vector3 } from 'three'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
@@ -11,6 +12,26 @@ import { createThreeYuruWorld } from '../src/index.js'
 import { attachYuru, detectVRMClothCandidates } from '../src/vrm.js'
 
 const sampleUrl = new URL('../../../examples/vrm/src/assets/AvatarSample_B.vrm', import.meta.url)
+
+const radialSectors = (
+  positions: Float32Array,
+  center: Vector3,
+): { count: number, meanRadius: number }[] => {
+  const result = Array.from({ length: 8 }, () => ({ count: 0, meanRadius: 0 }))
+  for (let offset = 0; offset < positions.length; offset += 3) {
+    const dx = positions[offset] - center.x
+    const dz = positions[offset + 2] - center.z
+    const normalizedAngle = (Math.atan2(dz, dx) + Math.PI) / (2 * Math.PI)
+    const sector = result[Math.min(result.length - 1, Math.floor(normalizedAngle * result.length))]
+    sector.count++
+    sector.meanRadius += Math.hypot(dx, dz)
+  }
+  for (const sector of result) {
+    if (sector.count > 0)
+      sector.meanRadius /= sector.count
+  }
+  return result
+}
 
 const loadOfficialSample = async (): Promise<VRM> => {
   const bytes = await readFile(sampleUrl)
@@ -45,6 +66,27 @@ describe('official VRM sample discovery', () => {
     expect(candidate?.confidence).toBeGreaterThan(0.9)
     expect(candidate?.triangles).toHaveLength(525)
     expect(candidate?.reasons.join(' ')).toContain('secondary bones')
+
+    const source = candidate.mesh
+    const position = source.geometry.getAttribute('position')
+    const index = source.geometry.getIndex()!.array
+    const vertices = new Set<number>()
+    for (const triangle of candidate.triangles!) {
+      vertices.add(index[triangle * 3])
+      vertices.add(index[triangle * 3 + 1])
+      vertices.add(index[triangle * 3 + 2])
+    }
+    source.updateWorldMatrix(true, false)
+    const hips = vrm.humanoid.getRawBoneNode(VRMHumanBoneName.Hips)!
+      .getWorldPosition(new Vector3())
+    source.worldToLocal(hips)
+    const quadrants = [false, false, false, false]
+    for (const vertex of vertices) {
+      const quadrant = (position.getX(vertex) >= hips.x ? 1 : 0)
+        + (position.getZ(vertex) >= hips.z ? 2 : 0)
+      quadrants[quadrant] = true
+    }
+    expect(quadrants).toEqual([true, true, true, true])
   }, 20_000)
 
   it('extracts only the detected triangles and restores the source on dispose', async () => {
@@ -99,6 +141,13 @@ describe('official VRM sample discovery', () => {
     }
 
     const positions = world.core.getPositions(body)
+    const hips = vrm.humanoid.getRawBoneNode(VRMHumanBoneName.Hips)!
+      .getWorldPosition(new Vector3())
+    const initialSectors = radialSectors(initial, hips)
+    const settledSectors = radialSectors(positions, hips)
+    expect(settledSectors.every(sector => sector.count > 0)).toBe(true)
+    for (let sector = 0; sector < settledSectors.length; sector++)
+      expect(settledSectors[sector].meanRadius).toBeGreaterThan(initialSectors[sector].meanRadius * 0.7)
     let maximumDisplacement = 0
     let lateralCenterX = 0
     for (let offset = 0; offset < positions.length; offset += 3) {

@@ -91,6 +91,12 @@ const validateBody = (descriptor: ClothBodyDescriptor): void => {
     throw new RangeError('inverseMasses must contain one value per particle')
   if (mesh.triangleMaterialIndices != null && mesh.triangleMaterialIndices.length !== mesh.indices.length / 3)
     throw new RangeError('triangleMaterialIndices must contain one value per triangle')
+  if (descriptor.motionConstraints !== false && descriptor.motionConstraints != null) {
+    if (descriptor.motionConstraints.maximumDistances.length !== count)
+      throw new RangeError('Motion maximumDistances must contain one value per particle')
+    if (descriptor.motionConstraints.targets != null && descriptor.motionConstraints.targets.length !== mesh.positions.length)
+      throw new RangeError('Motion targets must contain one packed xyz value per particle')
+  }
 }
 
 /**
@@ -217,6 +223,18 @@ export class CPUBackend implements ClothBackend {
       throw new RangeError('Reset positions do not match the body particle count')
     body.positions.set(source)
     this.post({ id, positions, type: 'resetBody' })
+  }
+
+  setMotionConstraintTargets(id: BodyId, positions: Float32Array): void {
+    if (this.direct != null) {
+      this.direct.setMotionConstraintTargets(id, positions)
+      return
+    }
+    this.assertActive()
+    const body = this.requireBody(id)
+    if (positions.length !== body.positions.length)
+      throw new RangeError('Motion targets must match the body particle count')
+    this.post({ id, positions, type: 'setMotionConstraintTargets' })
   }
 
   setParticleTargets(id: BodyId, indices: Uint32Array, positions: Float32Array): void {

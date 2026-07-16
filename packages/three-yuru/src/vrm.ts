@@ -108,6 +108,38 @@ const VRM_CLOTH_MATERIAL = {
   thickness: 0.003,
 } as const
 
+const automaticMotionDistances = (geometry: BufferGeometry, pins: Uint32Array): Float32Array => {
+  const position = geometry.getAttribute('position')
+  const index = geometry.getIndex()?.array
+  if (position == null || index == null)
+    return new Float32Array(position?.count ?? 0)
+  const edges = new Set<string>()
+  let totalLength = 0
+  const addEdge = (first: number, second: number): void => {
+    const a = Math.min(first, second)
+    const b = Math.max(first, second)
+    const key = `${a}:${b}`
+    if (edges.has(key))
+      return
+    edges.add(key)
+    totalLength += Math.hypot(
+      position.getX(a) - position.getX(b),
+      position.getY(a) - position.getY(b),
+      position.getZ(a) - position.getZ(b),
+    )
+  }
+  for (let offset = 0; offset + 2 < index.length; offset += 3) {
+    addEdge(index[offset], index[offset + 1])
+    addEdge(index[offset + 1], index[offset + 2])
+    addEdge(index[offset + 2], index[offset])
+  }
+  const maximumDistance = edges.size === 0 ? 0 : totalLength / edges.size * 2
+  const result = new Float32Array(position.count).fill(maximumDistance)
+  for (const pin of pins)
+    result[pin] = 0
+  return result
+}
+
 type PendingVRMBoneCollider = Omit<VRMBoneCollider, 'id'>
 
 interface VRMBoneCollider {
@@ -224,11 +256,15 @@ export class YuruController {
             return world.attachCloth(candidate.mesh, clothOptions)
           const extracted = new ExtractedSkinnedCloth(candidate.mesh, candidate.triangles)
           this.extracted.push(extracted)
+          const motionConstraints = clothOptions.motionConstraints ?? {
+            maximumDistances: automaticMotionDistances(extracted.simulationMesh.geometry, extracted.pinnedIndices),
+          }
           const collisionLayer = clothOptions.collisionLayer ?? 0
           const controller = world.attachCloth(extracted.mesh, {
             ...clothOptions,
             collisionLayer,
             collisionLayerAxis: clothOptions.collisionLayerAxis ?? [0, 1, 0],
+            motionConstraints,
             pin: clothOptions.pin ?? (clothOptions.inverseMasses == null && clothOptions.pinTopRatio == null
               ? extracted.pinnedIndices
               : undefined),

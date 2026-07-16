@@ -11,6 +11,8 @@ import type {
 import { BufferAttribute, Matrix4, Mesh, SkinnedMesh, Vector3 } from 'three'
 import { createClothWorld } from 'yuru'
 
+import { YURU_VISUAL_VERTEX_MAP } from './skinned-cloth.js'
+
 export { colliderFromThree, geometryToTriangleMeshShape } from './shapes.js'
 export type { CapsuleLike, ThreeColliderShape, ThreeShapeOptions } from './shapes.js'
 
@@ -144,11 +146,37 @@ const arraysEqual = (first: Float32Array, second: Float32Array): boolean => {
   return true
 }
 
-const createVisualBinding = (visualPositions: Float32Array, simulationPositions: Float32Array): VisualBinding => {
+const mappedVisualBinding = (
+  visualPositions: Float32Array,
+  simulationPositions: Float32Array,
+  directIndices: Uint32Array,
+): VisualBinding => {
   const visualCount = visualPositions.length / 3
   const simulationCount = simulationPositions.length / 3
-  if (simulationCount === 0)
-    throw new Error('A simulation mesh must contain at least one vertex')
+  if (directIndices.length !== visualCount)
+    throw new RangeError('Visual vertex map does not match the display mesh vertex count')
+  const indices = new Uint32Array(visualCount)
+  const offsets = new Float32Array(visualPositions.length)
+  for (let index = 0; index < visualCount; index++) {
+    const simulationIndex = directIndices[index]
+    if (simulationIndex >= simulationCount)
+      throw new RangeError('Visual vertex map references a missing simulation particle')
+    indices[index] = simulationIndex
+    const visualOffset = index * 3
+    const simulationOffset = simulationIndex * 3
+    offsets[visualOffset] = visualPositions[visualOffset] - simulationPositions[simulationOffset]
+    offsets[visualOffset + 1] = visualPositions[visualOffset + 1] - simulationPositions[simulationOffset + 1]
+    offsets[visualOffset + 2] = visualPositions[visualOffset + 2] - simulationPositions[simulationOffset + 2]
+  }
+  return { indices, offsets }
+}
+
+const nearestVisualBinding = (
+  visualPositions: Float32Array,
+  simulationPositions: Float32Array,
+): VisualBinding => {
+  const visualCount = visualPositions.length / 3
+  const simulationCount = simulationPositions.length / 3
   const indices = new Uint32Array(visualCount)
   const offsets = new Float32Array(visualPositions.length)
   if (arraysEqual(visualPositions, simulationPositions)) {
@@ -181,6 +209,18 @@ const createVisualBinding = (visualPositions: Float32Array, simulationPositions:
     offsets[visualOffset + 2] = z - simulationPositions[simulationOffset + 2]
   }
   return { indices, offsets }
+}
+
+const createVisualBinding = (
+  visualPositions: Float32Array,
+  simulationPositions: Float32Array,
+  directIndices?: Uint32Array,
+): VisualBinding => {
+  if (simulationPositions.length === 0)
+    throw new Error('A simulation mesh must contain at least one vertex')
+  return directIndices == null
+    ? nearestVisualBinding(visualPositions, simulationPositions)
+    : mappedVisualBinding(visualPositions, simulationPositions, directIndices)
 }
 
 export const meshToClothData = (
@@ -243,6 +283,7 @@ export class ThreeClothController {
 
   private disposed = false
   private readonly localRestPositions: Float32Array
+  private readonly motionTargetPositions?: Float32Array
   private readonly owner: ThreeYuruWorld
   private readonly ownsDisplay: boolean
   private readonly simulationSource: Mesh
@@ -271,7 +312,13 @@ export class ThreeClothController {
     this.mesh = isSkinnedMesh(sourceMesh)
       ? bakeSkinnedDisplay(sourceMesh, meshToClothData(sourceMesh, { pin: false }).localRestPositions)
       : sourceMesh
-    this.visualBinding = createVisualBinding(readWorldPositions(this.mesh), data.mesh.positions)
+    const proxyData = simulationSource.geometry.userData as Record<string, unknown>
+    const directIndices = proxyData[YURU_VISUAL_VERTEX_MAP]
+    this.visualBinding = createVisualBinding(
+      readWorldPositions(this.mesh),
+      data.mesh.positions,
+      directIndices instanceof Uint32Array ? directIndices : undefined,
+    )
     if (this.ownsDisplay)
       sourceMesh.visible = false
     const bodyOptions = { ...options }
@@ -279,6 +326,13 @@ export class ThreeClothController {
     delete bodyOptions.pin
     delete bodyOptions.pinTopRatio
     delete bodyOptions.simulationMesh
+    if (bodyOptions.motionConstraints !== false && bodyOptions.motionConstraints != null) {
+      this.motionTargetPositions = data.mesh.positions.slice()
+      bodyOptions.motionConstraints = {
+        ...bodyOptions.motionConstraints,
+        targets: this.motionTargetPositions,
+      }
+    }
     this.body = owner.core.addBody({
       ...bodyOptions,
       mesh: data.mesh,
@@ -331,7 +385,13 @@ export class ThreeClothController {
   }
 
   updateKinematicTargets(): void {
-    if (this.disposed || this.pinnedIndices.length === 0)
+    if (this.disposed)
+      return
+    if (this.motionTargetPositions != null) {
+      readWorldPositions(this.simulationSource, this.motionTargetPositions)
+      this.owner.core.setMotionConstraintTargets(this.body, this.motionTargetPositions)
+    }
+    if (this.pinnedIndices.length === 0)
       return
     this.simulationSource.updateWorldMatrix(true, false)
     const targets = this.targetPositions

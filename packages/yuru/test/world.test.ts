@@ -155,6 +155,50 @@ describe('clothWorld', () => {
     world.dispose()
   })
 
+  it('limits particles around animated motion constraint targets', async () => {
+    const world = createClothWorld({
+      fixedDelta: 1 / 60,
+      gravity: [0, -600, 0],
+      quality: { collisionIterations: 0, substeps: 1 },
+      speedLimit: 'unlimited',
+    })
+    const maximumDistances = new Float32Array([0.1, 0.1, 0.1])
+    const body = world.addBody({
+      materials: [{ bendCompliance: 1e6, shearCompliance: 1e6, stretchCompliance: 1e6 }],
+      mesh: triangle(new Float32Array([1, 1, 1])),
+      motionConstraints: { maximumDistances },
+      selfCollision: false,
+    })
+
+    await world.step(1 / 60)
+    const initialTargets = triangle().positions
+    let positions = world.getPositions(body)
+    for (let particle = 0; particle < maximumDistances.length; particle++) {
+      const offset = particle * 3
+      expect(Math.hypot(
+        positions[offset] - initialTargets[offset],
+        positions[offset + 1] - initialTargets[offset + 1],
+        positions[offset + 2] - initialTargets[offset + 2],
+      )).toBeLessThanOrEqual(maximumDistances[particle] + 1e-6)
+    }
+
+    const movedTargets = initialTargets.slice()
+    for (let offset = 1; offset < movedTargets.length; offset += 3)
+      movedTargets[offset]++
+    world.setMotionConstraintTargets(body, movedTargets)
+    await world.step(1 / 60)
+    positions = world.getPositions(body)
+    for (let particle = 0; particle < maximumDistances.length; particle++) {
+      const offset = particle * 3
+      expect(Math.hypot(
+        positions[offset] - movedTargets[offset],
+        positions[offset + 1] - movedTargets[offset + 1],
+        positions[offset + 2] - movedTargets[offset + 2],
+      )).toBeLessThanOrEqual(maximumDistances[particle] + 1e-6)
+    }
+    world.dispose()
+  })
+
   it('sweeps fast particles against colliders instead of sampling their midpoint', async () => {
     const createWorld = (continuousCollision: boolean) => createClothWorld({
       fixedDelta: 1 / 60,

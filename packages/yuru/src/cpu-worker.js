@@ -48,6 +48,9 @@ globalThis.onmessage = async ({ data }) => {
       case 'resetBody':
         backend.resetBody(data.id, data.positions)
         break
+      case 'setMotionConstraintTargets':
+        backend.setMotionConstraintTargets(data.id, data.positions)
+        break
       case 'setParticleTargets':
         backend.setParticleTargets(data.id, data.indices, data.positions)
         break

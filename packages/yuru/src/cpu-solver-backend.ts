@@ -37,6 +37,10 @@ interface BodyState {
   materials: ClothMaterial[]
   maximumSelfCollisionDepenetration: number
   maximumSelfCollisionDisplacement: number
+  motionConstraints?: {
+    maximumDistances: Float32Array
+    targets: Float32Array
+  }
   particleSpacing: number
   positions: Float32Array
   previous: Float32Array
@@ -229,6 +233,7 @@ export class CPUSolverBackend implements ClothBackend {
     }
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity -- Descriptor validation and typed-array state cooking are intentionally colocated.
   addBody(descriptor: ClothBodyDescriptor): BodyId {
     const { mesh } = descriptor
     if (mesh.positions.length === 0 || mesh.positions.length % 3 !== 0)
@@ -240,6 +245,16 @@ export class CPUSolverBackend implements ClothBackend {
       throw new RangeError('inverseMasses must contain one value per particle')
     if (mesh.triangleMaterialIndices != null && mesh.triangleMaterialIndices.length !== mesh.indices.length / 3)
       throw new RangeError('triangleMaterialIndices must contain one value per triangle')
+    if (descriptor.motionConstraints !== false && descriptor.motionConstraints != null) {
+      if (descriptor.motionConstraints.maximumDistances.length !== count)
+        throw new RangeError('Motion maximumDistances must contain one value per particle')
+      if (descriptor.motionConstraints.targets != null && descriptor.motionConstraints.targets.length !== mesh.positions.length)
+        throw new RangeError('Motion targets must contain one packed xyz value per particle')
+      for (const distance of descriptor.motionConstraints.maximumDistances) {
+        if (distance < 0 || !Number.isFinite(distance))
+          throw new RangeError('Motion maximumDistances must be finite non-negative values')
+      }
+    }
 
     const positions = mesh.positions.slice()
     const materials = descriptor.materials != null && descriptor.materials.length > 0
@@ -269,6 +284,12 @@ export class CPUSolverBackend implements ClothBackend {
       materials,
       maximumSelfCollisionDepenetration: Number.POSITIVE_INFINITY,
       maximumSelfCollisionDisplacement: Number.POSITIVE_INFINITY,
+      motionConstraints: descriptor.motionConstraints === false || descriptor.motionConstraints == null
+        ? undefined
+        : {
+            maximumDistances: descriptor.motionConstraints.maximumDistances.slice(),
+            targets: descriptor.motionConstraints.targets?.slice() ?? positions.slice(),
+          },
       particleSpacing: spacing,
       positions,
       previous: positions.slice(),
@@ -370,6 +391,15 @@ export class CPUSolverBackend implements ClothBackend {
     body.collisionPrevious.set(source)
   }
 
+  setMotionConstraintTargets(id: BodyId, positions: Float32Array): void {
+    const body = this.requireBody(id)
+    if (body.motionConstraints == null)
+      throw new Error(`Body ${id} has no motion constraints`)
+    if (positions.length !== body.positions.length)
+      throw new RangeError('Motion targets must match the body particle count')
+    body.motionConstraints.targets.set(positions)
+  }
+
   setParticleTargets(id: BodyId, indices: Uint32Array, positions: Float32Array): void {
     const body = this.requireBody(id)
     if (positions.length !== indices.length * 3)
@@ -407,6 +437,7 @@ export class CPUSolverBackend implements ClothBackend {
         this.solveDistanceConstraints(body, subDelta)
         this.solveAreaConstraints(body, subDelta)
         this.solveGrabs(body, subDelta)
+        this.solveMotionConstraints(body)
       }
 
       // Swept contact is part of every solver substep. Deferring it to the
@@ -431,6 +462,7 @@ export class CPUSolverBackend implements ClothBackend {
         }
       }
       for (const body of this.bodies.values()) {
+        this.solveMotionConstraints(body)
         this.applyTargets(body)
         this.applyLaplacianDamping(body, subDelta)
         body.collisionPrevious.set(body.positions)
@@ -1312,6 +1344,28 @@ export class CPUSolverBackend implements ClothBackend {
         body.positions[offset + 1] += (targetY - body.positions[offset + 1]) * scale
         body.positions[offset + 2] += (targetZ - body.positions[offset + 2]) * scale
       }
+    }
+  }
+
+  private solveMotionConstraints(body: BodyState): void {
+    const constraints = body.motionConstraints
+    if (constraints == null)
+      return
+    for (let particle = 0; particle < body.inverseMasses.length; particle++) {
+      if (body.inverseMasses[particle] === 0)
+        continue
+      const offset = particle * 3
+      const dx = body.positions[offset] - constraints.targets[offset]
+      const dy = body.positions[offset + 1] - constraints.targets[offset + 1]
+      const dz = body.positions[offset + 2] - constraints.targets[offset + 2]
+      const distance = Math.hypot(dx, dy, dz)
+      const maximumDistance = constraints.maximumDistances[particle]
+      if (distance <= maximumDistance || distance < EPSILON)
+        continue
+      const scale = maximumDistance / distance
+      body.positions[offset] = constraints.targets[offset] + dx * scale
+      body.positions[offset + 1] = constraints.targets[offset + 1] + dy * scale
+      body.positions[offset + 2] = constraints.targets[offset + 2] + dz * scale
     }
   }
 

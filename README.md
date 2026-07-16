@@ -48,6 +48,7 @@ world.getPositions(body)
 
 The CPU backend currently includes stretch, bend-distance, area, and geodesic
 tether constraints,
+animated per-particle motion constraints,
 fixed-step accumulation, vertex/triangle and edge/edge self/inter-cloth
 collisions, sphere/capsule/plane/rounded-box/triangle-mesh colliders, friction,
 wind/aerodynamic forces, volume grabs, and continuous particle collision against
@@ -87,10 +88,12 @@ Discovery handles both separately named clothing meshes and clothing embedded
 inside a merged `Body` mesh. For merged meshes it finds vertices weighted to
 secondary skirt/coat/clothing bones, extracts only matching triangles, keeps the
 rest of the original skinned mesh visible, and creates height-scaled skeletal
-capsule colliders for a narrow vertical body center and the individual legs. If
+capsule colliders for a narrow vertical body center and the individual legs.
 The extracted skirt is tethered to its animated waist boundary by mesh
-connectivity rather than spatial proximity. If confidence remains low it returns
-`needsConfiguration` instead of simulating a body, face, or hair by accident.
+connectivity rather than spatial proximity. Animated motion constraints keep
+all sides of the skirt near the authored silhouette without pinning local folds.
+If confidence remains low it returns `needsConfiguration` instead of simulating
+a body, face, or hair by accident.
 
 The Vitest suite loads the included official `AvatarSample_B.vrm` and verifies
 that its merged skirt is detected, extracted, attached, and restored on dispose.

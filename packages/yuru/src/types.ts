@@ -25,6 +25,13 @@ export interface ClothMeshData {
   triangleMaterialIndices?: Uint16Array
 }
 
+export interface ClothMotionConstraints {
+  /** Maximum distance each particle may move from its animated target. */
+  maximumDistances: Float32Array
+  /** Initial packed xyz targets. Defaults to the mesh positions. */
+  targets?: Float32Array
+}
+
 /**
  * Numeric limits are expressed in meters per second. `automatic` derives a
  * per-substep displacement cap from cloth thickness and rest-particle spacing.
@@ -80,6 +87,8 @@ export interface ClothBodyDescriptor {
   id?: string
   materials?: readonly Partial<ClothMaterial>[]
   mesh: ClothMeshData
+  /** Per-particle animated motion limits, equivalent to painted cloth max distances. */
+  motionConstraints?: ClothMotionConstraints | false
   selfCollision?: boolean
   /** Long-range constraints to connected pinned particles. Defaults on when pins exist. */
   tethers?: boolean
@@ -231,6 +240,7 @@ export interface ClothBackend {
   removeCollider: (id: ColliderId) => void
   removeGrab: (id: GrabId) => void
   resetBody: (id: BodyId, positions?: Float32Array) => void
+  setMotionConstraintTargets: (id: BodyId, positions: Float32Array) => void
   setParticleTargets: (id: BodyId, indices: Uint32Array, positions: Float32Array) => void
   step: (delta: number, options: BackendStepOptions) => Promise<void> | void
   updateCollider: (id: ColliderId, descriptor: ColliderDescriptor) => void

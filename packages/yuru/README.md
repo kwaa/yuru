@@ -49,6 +49,8 @@ There is no string-based backend selector and no implicit backend switch.
 - Stretch, bend-distance, and area constraints.
 - Geodesic long-range tethers from dynamic particles to connected pins. They
   default on when pins exist and can be disabled with `tethers: false`.
+- Per-particle motion constraints with animated targets and painted maximum
+  distances. Targets can be updated with `setMotionConstraintTargets`.
 - Vertex/triangle and edge/edge self- and inter-cloth collision.
 - Ordered garment layers with an optional axis-projected contact normal for
   inner/body, simulated garment, and outer-garment relationships.
