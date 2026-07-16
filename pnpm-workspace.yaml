@@ -35,5 +35,8 @@ catalog:
   pkgroll: ^2.27.1
   react: ^19.2.7
   react-dom: ^19.2.7
+  rolldown-plugin-wasm: ^0.3.2
   three: ^0.185.1
+  tsdown: ^0.22.8
   vite: ^8.1.4
+  vitest: ^4.1.10

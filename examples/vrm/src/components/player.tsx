@@ -43,7 +43,7 @@ export const Player = () => {
       return
 
     if (playerRef.current.position.y < -10)
-      playerRef.current.position.set(0,0,0)
+      playerRef.current.position.set(0, 0, 0)
   })
 
   return (

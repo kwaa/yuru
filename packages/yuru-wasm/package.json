@@ -1,0 +1,30 @@
+{
+  "name": "yuru-wasm",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": "./src/index.ts",
+  "files": ["dist"],
+  "publishConfig": {
+    "exports": {
+      ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "./package.json": "./package.json"
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "wasm:build": "pnpm wasm:build:single",
+    "wasm:build:single": "wasm-pack build ./rust --target bundler --out-dir ../src/generated/single --out-name yuru_wasm_single --release --no-pack"
+  },
+  "dependencies": {
+    "yuru": "workspace:*"
+  },
+  "devDependencies": {
+    "rolldown-plugin-wasm": "catalog:",
+    "tsdown": "catalog:"
+  }
+}

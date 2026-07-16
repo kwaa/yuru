@@ -21,9 +21,16 @@
         in
         {
           default = pkgs.mkShell {
-            nativeBuildInputs = [];
+            nativeBuildInputs = with pkgs; [
+              binaryen
+              llvmPackages.bintools
+              wasm-bindgen-cli
+              wasm-pack
+            ];
 
             buildInputs = [];
+
+            RUST_BACKTRACE = "1";
           };
         }
       );

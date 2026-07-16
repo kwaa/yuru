@@ -10,9 +10,12 @@
     "url": "git+https://github.com/kwaa/yuru.git",
     "directory": "packages/yuru"
   },
-  "bugs": "https://github.com/moeru-ai/xsai/issues",
+  "bugs": "https://github.com/kwaa/yuru/issues",
   "sideEffects": false,
-  "exports": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cpu-worker": "./src/cpu-worker.js"
+  },
   "files": [
     "dist"
   ],
@@ -22,14 +25,20 @@
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"
       },
+      "./cpu-worker": {
+        "default": "./dist/cpu-worker.js"
+      },
       "./package.json": "./package.json"
     },
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts"
   },
   "scripts": {
-    "build": "pkgroll"
+    "build": "pkgroll",
+    "test": "vitest run"
   },
-  "dependencies": {
+  "dependencies": {},
+  "devDependencies": {
+    "vitest": "catalog:"
   }
 }

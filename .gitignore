@@ -26,3 +26,12 @@ docs/.vitepress/dist
 
 # direnv
 .direnv
+
+# rust target
+target
+packages/yuru-wasm/src/generated
+
+# agent
+docs
+dogfood-output
+research

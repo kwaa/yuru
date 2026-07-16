@@ -18,7 +18,11 @@
     "foxact": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "three": "catalog:"
+    "react-three-yuru": "workspace:*",
+    "three": "catalog:",
+    "three-yuru": "workspace:*",
+    "yuru": "workspace:*",
+    "yuru-wasm": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "catalog:",

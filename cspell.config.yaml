@@ -4,6 +4,8 @@ dictionaryDefinitions: []
 dictionaries: []
 words:
   - antfu
+  - binaryen
+  - cdylib
   - direnv
   - drei
   - esbuild
@@ -13,10 +15,12 @@ words:
   - nixpkgs
   - pixiv
   - pkgs
+  - sonarjs
   - vite
   - vitejs
   - vitepress
   - viverse
+  - XPBD
   - yuru
   - yurujs
 ignoreWords: []

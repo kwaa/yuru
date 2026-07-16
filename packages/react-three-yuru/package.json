@@ -1,0 +1,50 @@
+{
+  "name": "react-three-yuru",
+  "type": "module",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./rapier": "./src/rapier.ts",
+    "./vrm": "./src/vrm.ts"
+  },
+  "files": ["dist"],
+  "publishConfig": {
+    "exports": {
+      ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+      "./rapier": { "types": "./dist/rapier.d.ts", "default": "./dist/rapier.js" },
+      "./vrm": { "types": "./dist/vrm.d.ts", "default": "./dist/vrm.js" },
+      "./package.json": "./package.json"
+    }
+  },
+  "scripts": {
+    "build": "pkgroll"
+  },
+  "peerDependencies": {
+    "@pixiv/three-vrm": "^3.5.5",
+    "@react-three/fiber": "^9.6.0",
+    "@react-three/rapier": "*",
+    "@types/react": "^19.2.0",
+    "@types/three": "^0.185.0",
+    "react": "^19.2.0",
+    "three": "^0.185.0"
+  },
+  "peerDependenciesMeta": {
+    "@pixiv/three-vrm": { "optional": true },
+    "@react-three/rapier": { "optional": true }
+  },
+  "dependencies": {
+    "three-yuru": "workspace:*",
+    "yuru": "workspace:*"
+  },
+  "devDependencies": {
+    "@pixiv/three-vrm": "catalog:",
+    "@react-three/fiber": "catalog:",
+    "@types/react": "catalog:",
+    "@types/three": "catalog:",
+    "react": "catalog:",
+    "three": "catalog:"
+  }
+}
