@@ -84,7 +84,8 @@ Discovery handles both separately named clothing meshes and clothing embedded
 inside a merged `Body` mesh. For merged meshes it finds vertices weighted to
 secondary skirt/coat/clothing bones, extracts only matching triangles, keeps the
 rest of the original skinned mesh visible, and creates height-scaled skeletal
-capsule colliders for the torso and legs. If confidence remains low it returns
+capsule colliders for a narrow vertical body center and the individual legs. If
+confidence remains low it returns
 `needsConfiguration` instead of simulating a body, face, or hair by accident.
 
 The Vitest suite loads the included official `AvatarSample_B.vrm` and verifies

@@ -23,6 +23,8 @@ export interface ThreeClothOptions extends Omit<ClothBodyDescriptor, 'mesh'> {
   simulationMesh?: Mesh
 }
 
+export interface ThreeKinematicClothColliderOptions extends Omit<ClothBodyDescriptor, 'mesh' | 'selfCollision'> {}
+
 export interface ThreeMeshData {
   localRestPositions: Float32Array
   mesh: ClothMeshData
@@ -115,12 +117,14 @@ const pinnedFromMasses = (inverseMasses: Float32Array): Uint32Array => {
   return Uint32Array.from(result)
 }
 
-const readWorldPositions = (mesh: Mesh): Float32Array => {
+const readWorldPositions = (mesh: Mesh, target?: Float32Array): Float32Array => {
   mesh.updateWorldMatrix(true, false)
   const position = mesh.geometry.getAttribute('position')
   if (position == null)
     throw new Error(`${mesh.name || 'Mesh'} requires a position attribute`)
-  const result = new Float32Array(position.count * 3)
+  const result = target ?? new Float32Array(position.count * 3)
+  if (result.length !== position.count * 3)
+    throw new RangeError('World-position target does not match the mesh vertex count')
   const point = new Vector3()
   for (let index = 0; index < position.count; index++) {
     mesh.getVertexPosition(index, point)
@@ -345,6 +349,47 @@ export class ThreeClothController {
   }
 }
 
+/** A skinned or transformed mesh that participates in cloth inter-collision without being simulated or rendered by Yuru. */
+export class ThreeKinematicClothCollider {
+  readonly body: BodyId
+  readonly mesh: Mesh
+
+  private disposed = false
+  private readonly indices: Uint32Array
+  private readonly owner: ThreeYuruWorld
+  private readonly targets: Float32Array
+
+  constructor(owner: ThreeYuruWorld, mesh: Mesh, options: ThreeKinematicClothColliderOptions = {}) {
+    this.owner = owner
+    this.mesh = mesh
+    const data = meshToClothData(mesh, { pin: false })
+    const particleCount = data.mesh.positions.length / 3
+    data.mesh.inverseMasses = new Float32Array(particleCount)
+    this.indices = Uint32Array.from({ length: particleCount }, (_, item) => item)
+    this.targets = data.mesh.positions.slice()
+    this.body = owner.core.addBody({
+      ...options,
+      mesh: data.mesh,
+      selfCollision: false,
+    })
+  }
+
+  dispose(): void {
+    if (this.disposed)
+      return
+    this.disposed = true
+    this.owner.detachKinematicCollider(this)
+    this.owner.core.removeBody(this.body)
+  }
+
+  updateKinematicTargets(): void {
+    if (this.disposed)
+      return
+    readWorldPositions(this.mesh, this.targets)
+    this.owner.core.setParticleTargets(this.body, this.indices, this.targets)
+  }
+}
+
 export class ThreeYuruWorld {
   readonly core: ClothWorld
   get diagnostics(): Readonly<RuntimeDiagnostics> {
@@ -353,6 +398,7 @@ export class ThreeYuruWorld {
 
   private readonly beforeStep = new Set<() => void>()
   private readonly controllers = new Set<ThreeClothController>()
+  private readonly kinematicColliders = new Set<ThreeKinematicClothCollider>()
 
   private pending = Promise.resolve()
   private queuedDelta = 0
@@ -373,13 +419,28 @@ export class ThreeYuruWorld {
     return controller
   }
 
+  attachKinematicClothCollider(
+    mesh: Mesh,
+    options: ThreeKinematicClothColliderOptions = {},
+  ): ThreeKinematicClothCollider {
+    const controller = new ThreeKinematicClothCollider(this, mesh, options)
+    this.kinematicColliders.add(controller)
+    return controller
+  }
+
   detach(controller: ThreeClothController): void {
     this.controllers.delete(controller)
+  }
+
+  detachKinematicCollider(controller: ThreeKinematicClothCollider): void {
+    this.kinematicColliders.delete(controller)
   }
 
   dispose(): void {
     for (const controller of [...this.controllers])
       controller.dispose()
+    for (const collider of [...this.kinematicColliders])
+      collider.dispose()
     this.beforeStep.clear()
     this.core.dispose()
   }
@@ -405,6 +466,8 @@ export class ThreeYuruWorld {
       this.queuedDelta = 0
       for (const callback of this.beforeStep)
         callback()
+      for (const collider of this.kinematicColliders)
+        collider.updateKinematicTargets()
       for (const controller of this.controllers)
         controller.updateKinematicTargets()
       await this.core.step(delta)

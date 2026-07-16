@@ -47,8 +47,10 @@ There is no string-based backend selector and no implicit backend switch.
 - Fixed-step accumulation with bounded catch-up.
 - Stretch, bend-distance, and area constraints.
 - Vertex/triangle and edge/edge self- and inter-cloth collision.
+- Ordered garment layers with an optional axis-projected contact normal for
+  inner/body, simulated garment, and outer-garment relationships.
 - Density-aware particle displacement limiting and bounded initial-overlap
-  correction for robust self-collision.
+  correction for robust self- and inter-layer collision.
 - Connected-particle velocity damping plus bounded inelastic contact friction.
 - Sphere, capsule, plane, rounded-box, and triangle-mesh colliders.
 - Friction, wind/aerodynamic forces, configurable force fields, and volume grabs.

@@ -5,6 +5,7 @@ import { BufferAttribute, BufferGeometry, SkinnedMesh } from 'three'
 const CLOTH_BONE_NAME = /skirt|coat.?skirt|dress|robe|cape|cloth|sleeve|hem|apron|ribbon|scarf|mantle|[裾裙袖]/i
 const RIGID_CLOTHING_NAME = /shoe|boot|heel|sole|glove|button|buckle/i
 const WELD_PRECISION = 100_000
+const COLLISION_NEIGHBORHOOD_MINIMUM = 0.03
 
 export interface SkinnedClothSelection {
   clothBoneNames: readonly string[]
@@ -228,8 +229,207 @@ const subsetGeometry = (
   return result
 }
 
+const positionKey = (position: BufferAttribute | InterleavedBufferAttribute, vertex: number): string =>
+  `${Math.round(position.getX(vertex) * WELD_PRECISION)},${Math.round(position.getY(vertex) * WELD_PRECISION)},${Math.round(position.getZ(vertex) * WELD_PRECISION)}`
+
+const weldedComponentRoots = (
+  position: BufferAttribute | InterleavedBufferAttribute,
+  index: ArrayLike<number>,
+): Int32Array => {
+  const keyToVertex = new Map<string, number>()
+  const welded = new Int32Array(position.count)
+  for (let vertex = 0; vertex < position.count; vertex++) {
+    const key = positionKey(position, vertex)
+    let mapped = keyToVertex.get(key)
+    if (mapped == null) {
+      mapped = keyToVertex.size
+      keyToVertex.set(key, mapped)
+    }
+    welded[vertex] = mapped
+  }
+  const parents = Int32Array.from({ length: keyToVertex.size }, (_, item) => item)
+  const find = (item: number): number => {
+    let root = item
+    while (parents[root] !== root)
+      root = parents[root]
+    while (parents[item] !== item) {
+      const parent = parents[item]
+      parents[item] = root
+      item = parent
+    }
+    return root
+  }
+  const join = (first: number, second: number): void => {
+    const firstRoot = find(first)
+    const secondRoot = find(second)
+    if (firstRoot !== secondRoot)
+      parents[secondRoot] = firstRoot
+  }
+  for (let offset = 0; offset + 2 < index.length; offset += 3) {
+    join(welded[index[offset]], welded[index[offset + 1]])
+    join(welded[index[offset + 1]], welded[index[offset + 2]])
+  }
+  return Int32Array.from(welded, item => find(item))
+}
+
+const collisionNeighborhood = (
+  source: BufferGeometry,
+  selectedTriangles: ReadonlySet<number>,
+// eslint-disable-next-line sonarjs/cognitive-complexity
+): Set<number> => {
+  const position = source.getAttribute('position')
+  const index = geometryIndex(source)
+  const componentRoots = weldedComponentRoots(position, index)
+  const selectedComponents = new Set<number>()
+  const selectedPositions = new Set<string>()
+  const selectedRadii: number[] = []
+  const minimum = [Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY]
+  const maximum = [Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY]
+  for (const triangle of selectedTriangles) {
+    for (let corner = 0; corner < 3; corner++) {
+      const vertex = index[triangle * 3 + corner]
+      selectedComponents.add(componentRoots[vertex])
+      selectedPositions.add(positionKey(position, vertex))
+      for (let axis = 0; axis < 3; axis++) {
+        const value = position.getComponent(vertex, axis)
+        minimum[axis] = Math.min(minimum[axis], value)
+        maximum[axis] = Math.max(maximum[axis], value)
+      }
+    }
+  }
+  const diagonal = Math.hypot(
+    maximum[0] - minimum[0],
+    maximum[1] - minimum[1],
+    maximum[2] - minimum[2],
+  )
+  const padding = Math.max(COLLISION_NEIGHBORHOOD_MINIMUM, diagonal * 0.1)
+  const centerX = (minimum[0] + maximum[0]) * 0.5
+  const centerZ = (minimum[2] + maximum[2]) * 0.5
+  for (const triangle of selectedTriangles) {
+    for (let corner = 0; corner < 3; corner++) {
+      const vertex = index[triangle * 3 + corner]
+      selectedRadii.push(Math.hypot(position.getX(vertex) - centerX, position.getZ(vertex) - centerZ))
+    }
+  }
+  selectedRadii.sort((a, b) => a - b)
+  const layerRadius = selectedRadii[Math.floor(selectedRadii.length * 0.5)] ?? 0
+  const result = new Set<number>()
+  for (let triangle = 0; triangle * 3 + 2 < index.length; triangle++) {
+    if (selectedTriangles.has(triangle))
+      continue
+    let sharesSelectedPosition = false
+    let overlaps = true
+    for (let axis = 0; axis < 3; axis++) {
+      let triangleMinimum = Number.POSITIVE_INFINITY
+      let triangleMaximum = Number.NEGATIVE_INFINITY
+      for (let corner = 0; corner < 3; corner++) {
+        const vertex = index[triangle * 3 + corner]
+        sharesSelectedPosition ||= selectedPositions.has(positionKey(position, vertex))
+        const value = position.getComponent(vertex, axis)
+        triangleMinimum = Math.min(triangleMinimum, value)
+        triangleMaximum = Math.max(triangleMaximum, value)
+      }
+      overlaps &&= triangleMaximum >= minimum[axis] - padding && triangleMinimum <= maximum[axis] + padding
+    }
+    // Adjacent seam triangles are the attachment, not a second garment layer.
+    if (!overlaps || sharesSelectedPosition)
+      continue
+    const a = index[triangle * 3]
+    const b = index[triangle * 3 + 1]
+    const c = index[triangle * 3 + 2]
+    const centroidX = (position.getX(a) + position.getX(b) + position.getX(c)) / 3
+    const centroidZ = (position.getZ(a) + position.getZ(b) + position.getZ(c)) / 3
+    const abx = position.getX(b) - position.getX(a)
+    const aby = position.getY(b) - position.getY(a)
+    const abz = position.getZ(b) - position.getZ(a)
+    const acx = position.getX(c) - position.getX(a)
+    const acy = position.getY(c) - position.getY(a)
+    const acz = position.getZ(c) - position.getZ(a)
+    const normalX = aby * acz - abz * acy
+    const normalZ = abx * acy - aby * acx
+    // Merged character garments can contain both sides of a thin shell.
+    // Retain only the outward-facing surface so ordered contacts do not
+    // receive contradictory normals from the coat's inner duplicate.
+    if (normalX * (centroidX - centerX) + normalZ * (centroidZ - centerZ) <= 0)
+      continue
+    const radius = Math.hypot(centroidX - centerX, centroidZ - centerZ)
+    const sameGarmentIsland = selectedComponents.has(componentRoots[a])
+    if (!sameGarmentIsland && radius >= layerRadius * 0.8)
+      result.add(triangle)
+  }
+  return result
+}
+
+const collisionGeometry = (
+  source: BufferGeometry,
+  triangles: ReadonlySet<number>,
+): BufferGeometry => {
+  const subset = subsetGeometry(source, triangles, true)
+  const result = weldSkinnedSimulationGeometry(subset)
+  subset.dispose()
+  return result
+}
+
+const hiddenSkinnedMesh = (source: SkinnedMesh, geometry: BufferGeometry, suffix: string): SkinnedMesh => {
+  const mesh = new SkinnedMesh(geometry, source.material)
+  mesh.name = `${source.name || 'SkinnedMesh'}_${suffix}`
+  mesh.bindMode = source.bindMode
+  mesh.bind(source.skeleton, source.bindMatrix)
+  mesh.position.copy(source.position)
+  mesh.quaternion.copy(source.quaternion)
+  mesh.scale.copy(source.scale)
+  mesh.visible = false
+  mesh.frustumCulled = false
+  mesh.morphTargetInfluences = source.morphTargetInfluences?.slice()
+  mesh.morphTargetDictionary = source.morphTargetDictionary == null
+    ? undefined
+    : { ...source.morphTargetDictionary }
+  source.parent?.add(mesh)
+  return mesh
+}
+
+const topBoundaryPins = (geometry: BufferGeometry): Uint32Array => {
+  const position = geometry.getAttribute('position')
+  const index = geometryIndex(geometry)
+  const edgeCounts = new Map<string, { a: number, b: number, count: number }>()
+  const add = (first: number, second: number): void => {
+    const a = Math.min(first, second)
+    const b = Math.max(first, second)
+    const key = `${a}:${b}`
+    const edge = edgeCounts.get(key)
+    if (edge == null)
+      edgeCounts.set(key, { a, b, count: 1 })
+    else
+      edge.count++
+  }
+  for (let offset = 0; offset + 2 < index.length; offset += 3) {
+    add(index[offset], index[offset + 1])
+    add(index[offset + 1], index[offset + 2])
+    add(index[offset + 2], index[offset])
+  }
+  let minimumY = Number.POSITIVE_INFINITY
+  let maximumY = Number.NEGATIVE_INFINITY
+  for (let vertex = 0; vertex < position.count; vertex++) {
+    minimumY = Math.min(minimumY, position.getY(vertex))
+    maximumY = Math.max(maximumY, position.getY(vertex))
+  }
+  const threshold = maximumY - (maximumY - minimumY) * 0.15
+  const pins = new Set<number>()
+  for (const edge of edgeCounts.values()) {
+    if (edge.count !== 1)
+      continue
+    if (position.getY(edge.a) >= threshold)
+      pins.add(edge.a)
+    if (position.getY(edge.b) >= threshold)
+      pins.add(edge.b)
+  }
+  return Uint32Array.from([...pins].sort((a, b) => a - b))
+}
+
 export class ExtractedSkinnedCloth {
+  readonly collisionLayers: readonly { mesh: SkinnedMesh, offset: 1 }[]
   readonly mesh: SkinnedMesh
+  readonly pinnedIndices: Uint32Array
   readonly simulationMesh: SkinnedMesh
 
   private disposed = false
@@ -246,6 +446,10 @@ export class ExtractedSkinnedCloth {
     const selected = new Set(triangles)
     const clothGeometry = subsetGeometry(source.geometry, selected, true)
     const simulationGeometry = weldSkinnedSimulationGeometry(clothGeometry)
+    const collisionTriangles = collisionNeighborhood(source.geometry, selected)
+    const outerCollisionGeometry = collisionTriangles.size === 0
+      ? undefined
+      : collisionGeometry(source.geometry, collisionTriangles)
     this.remainderGeometry = subsetGeometry(source.geometry, selected, false)
     source.geometry = this.remainderGeometry
     source.updateMorphTargets()
@@ -267,26 +471,21 @@ export class ExtractedSkinnedCloth {
       : { ...source.morphTargetDictionary }
     source.parent?.add(this.mesh)
 
-    this.simulationMesh = new SkinnedMesh(simulationGeometry, source.material)
-    this.simulationMesh.name = `${source.name || 'SkinnedMesh'}_YuruSimulationProxy`
-    this.simulationMesh.bindMode = source.bindMode
-    this.simulationMesh.bind(source.skeleton, source.bindMatrix)
-    this.simulationMesh.position.copy(source.position)
-    this.simulationMesh.quaternion.copy(source.quaternion)
-    this.simulationMesh.scale.copy(source.scale)
-    this.simulationMesh.visible = false
-    this.simulationMesh.frustumCulled = false
-    this.simulationMesh.morphTargetInfluences = source.morphTargetInfluences?.slice()
-    this.simulationMesh.morphTargetDictionary = source.morphTargetDictionary == null
-      ? undefined
-      : { ...source.morphTargetDictionary }
-    source.parent?.add(this.simulationMesh)
+    this.simulationMesh = hiddenSkinnedMesh(source, simulationGeometry, 'YuruSimulationProxy')
+    this.pinnedIndices = topBoundaryPins(simulationGeometry)
+    this.collisionLayers = [
+      outerCollisionGeometry == null ? undefined : { mesh: hiddenSkinnedMesh(source, outerCollisionGeometry, 'YuruOuterCollisionLayer'), offset: 1 as const },
+    ].filter((layer): layer is { mesh: SkinnedMesh, offset: 1 } => layer != null)
   }
 
   dispose(): void {
     if (this.disposed)
       return
     this.disposed = true
+    for (const layer of this.collisionLayers) {
+      layer.mesh.removeFromParent()
+      layer.mesh.geometry.dispose()
+    }
     this.simulationMesh.removeFromParent()
     this.simulationMesh.geometry.dispose()
     this.mesh.removeFromParent()

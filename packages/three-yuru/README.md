@@ -28,6 +28,10 @@ Use `simulationMesh` to drive a dense display mesh with a lower-resolution
 proxy. The display binding preserves each visual vertex's initial offset from
 its nearest simulation particle.
 
+Use `attachKinematicClothCollider()` for a skinned or transformed collision
+surface that should participate in cloth inter-collision without being
+simulated or rendered by Yuru.
+
 ## VRM
 
 ```ts
@@ -41,9 +45,14 @@ Detection supports separate clothing meshes and clothing embedded in a merged
 skinned body mesh. Merged regions are selected from secondary clothing-bone
 weights and extracted without hiding the remaining body. The automatic path
 welds render-only UV/material seam splits into an unrendered simulation proxy,
-uses a stable upper-garment pin band, and shrinks height-scaled torso/leg
-capsules to avoid rest-pose cloth penetration. Low-confidence results return
-`needsConfiguration` instead of simulating an unsafe candidate.
+pins the actual upper boundary loop, and treats a nearby outer garment island
+as a separately skinned kinematic layer. Ordered, gravity-axis-projected contact
+keeps the dynamic skirt below the coat without lifting its hem, preserves the
+authored rest gap, and uses low interface friction so pleats can slide past the
+coat edge. Individual leg capsules are fitted inside the rest-pose clearance;
+a narrow vertical center proxy prevents panels collapsing between the legs,
+while the broad horizontal pelvis proxy remains omitted. Low-confidence
+results return `needsConfiguration` instead of simulating an unsafe candidate.
 
 ## TSL/WebGPU
 

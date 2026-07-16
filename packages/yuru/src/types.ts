@@ -72,6 +72,10 @@ export interface CapsuleCollider {
 
 export interface ClothBodyDescriptor {
   collisionFilter?: Partial<CollisionFilter>
+  /** Ordered garment layer. Higher layers stay on the positive/outside side of lower layers. */
+  collisionLayer?: number
+  /** Optional axis removed from ordered contact normals, useful for gravity-led layered garments. */
+  collisionLayerAxis?: Vec3Like
   id?: string
   materials?: readonly Partial<ClothMaterial>[]
   mesh: ClothMeshData

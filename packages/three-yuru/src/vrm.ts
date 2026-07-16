@@ -1,9 +1,14 @@
 import type { VRM, VRMHumanBoneName as VRMHumanBoneNameType } from '@pixiv/three-vrm'
 import type { BufferGeometry, Material, Object3D } from 'three'
 import type { GLTF, GLTFLoaderPlugin, GLTFParser } from 'three/examples/jsm/loaders/GLTFLoader.js'
-import type { ColliderDescriptor, ColliderId } from 'yuru'
+import type { BodyId, ColliderDescriptor, ColliderId } from 'yuru'
 
-import type { ThreeClothController, ThreeClothOptions, ThreeYuruWorld } from './index.js'
+import type {
+  ThreeClothController,
+  ThreeClothOptions,
+  ThreeKinematicClothCollider,
+  ThreeYuruWorld,
+} from './index.js'
 
 import { VRMHumanBoneName } from '@pixiv/three-vrm'
 import { Mesh, SkinnedMesh, Vector3 } from 'three'
@@ -87,13 +92,21 @@ interface BoneColliderSpec {
 }
 
 const BODY_COLLIDERS: readonly BoneColliderSpec[] = [
-  { end: VRMHumanBoneName.Chest, radiusScale: 0.12, start: VRMHumanBoneName.Hips },
+  { end: VRMHumanBoneName.Chest, radiusScale: 0.035, start: VRMHumanBoneName.Hips },
   { end: VRMHumanBoneName.RightUpperLeg, radiusScale: 0.09, start: VRMHumanBoneName.LeftUpperLeg },
-  { end: VRMHumanBoneName.LeftLowerLeg, radiusScale: 0.065, start: VRMHumanBoneName.LeftUpperLeg },
-  { end: VRMHumanBoneName.RightLowerLeg, radiusScale: 0.065, start: VRMHumanBoneName.RightUpperLeg },
+  { end: VRMHumanBoneName.LeftLowerLeg, radiusScale: 0.035, start: VRMHumanBoneName.LeftUpperLeg },
+  { end: VRMHumanBoneName.RightLowerLeg, radiusScale: 0.035, start: VRMHumanBoneName.RightUpperLeg },
   { end: VRMHumanBoneName.LeftFoot, radiusScale: 0.05, start: VRMHumanBoneName.LeftLowerLeg },
   { end: VRMHumanBoneName.RightFoot, radiusScale: 0.05, start: VRMHumanBoneName.RightLowerLeg },
 ]
+
+const VRM_CLOTH_MATERIAL = {
+  bendCompliance: 5e-6,
+  damping: 0.02,
+  kineticFriction: 0.15,
+  staticFriction: 0.2,
+  thickness: 0.003,
+} as const
 
 type PendingVRMBoneCollider = Omit<VRMBoneCollider, 'id'>
 
@@ -173,10 +186,12 @@ export class YuruController {
   readonly bodyColliders: readonly ColliderId[]
   readonly candidates: readonly VRMClothCandidate[]
   readonly cloth: readonly ThreeClothController[]
+  readonly garmentLayers: readonly BodyId[]
   readonly status: YuruVRMStatus
   readonly vrm: VRM
   readonly world: ThreeYuruWorld
   private readonly extracted: ExtractedSkinnedCloth[] = []
+  private readonly kinematicGarmentLayers: ThreeKinematicClothCollider[] = []
   private readonly removeBeforeStep: () => void
   private readonly vrmBoneColliders: VRMBoneCollider[] = []
 
@@ -192,7 +207,8 @@ export class YuruController {
     delete clothOptions.bodyColliders
     delete clothOptions.confidenceThreshold
     delete clothOptions.meshes
-    clothOptions.pinTopRatio ??= 0.08
+    if (clothOptions.materials == null || clothOptions.materials.length === 0)
+      clothOptions.materials = [VRM_CLOTH_MATERIAL]
     const threshold = options.confidenceThreshold ?? 0.55
     if (options.meshes != null) {
       this.cloth = options.meshes.map(mesh => world.attachCloth(mesh, clothOptions))
@@ -205,16 +221,40 @@ export class YuruController {
             return world.attachCloth(candidate.mesh, clothOptions)
           const extracted = new ExtractedSkinnedCloth(candidate.mesh, candidate.triangles)
           this.extracted.push(extracted)
-          return world.attachCloth(extracted.mesh, {
+          const collisionLayer = clothOptions.collisionLayer ?? 0
+          const controller = world.attachCloth(extracted.mesh, {
             ...clothOptions,
+            collisionLayer,
+            collisionLayerAxis: clothOptions.collisionLayerAxis ?? [0, 1, 0],
+            pin: clothOptions.pin ?? (clothOptions.inverseMasses == null && clothOptions.pinTopRatio == null
+              ? extracted.pinnedIndices
+              : undefined),
             simulationMesh: clothOptions.simulationMesh ?? extracted.simulationMesh,
           })
+          const thickness = clothThickness(clothOptions)
+          for (const layer of extracted.collisionLayers) {
+            this.kinematicGarmentLayers.push(world.attachKinematicClothCollider(layer.mesh, {
+              collisionLayer: collisionLayer + layer.offset,
+              collisionLayerAxis: clothOptions.collisionLayerAxis ?? [0, 1, 0],
+              materials: [{
+                kineticFriction: 0.01,
+                staticFriction: 0.02,
+                thickness: Math.min(0.001, thickness / 3),
+              }],
+            }))
+          }
+          return controller
         })
     }
+    this.garmentLayers = this.kinematicGarmentLayers.map(layer => layer.body)
     if (options.bodyColliders !== false) {
       const height = avatarHeight(vrm)
       const thickness = clothThickness(clothOptions)
-      for (const spec of BODY_COLLIDERS) {
+      // A narrow vertical center proxy stops the panels falling between the
+      // legs. The broad horizontal pelvis proxy remains excluded because it
+      // forces a short skirt into a bell.
+      const colliderSpecs = [BODY_COLLIDERS[0], ...BODY_COLLIDERS.slice(2)]
+      for (const spec of colliderSpecs) {
         const start = vrm.humanoid.getRawBoneNode(spec.start)
         const end = vrm.humanoid.getRawBoneNode(spec.end)
         if (start == null || end == null)
@@ -235,6 +275,8 @@ export class YuruController {
     this.removeBeforeStep()
     for (const controller of this.cloth)
       controller.dispose()
+    for (const layer of this.kinematicGarmentLayers)
+      layer.dispose()
     for (const extracted of this.extracted)
       extracted.dispose()
     for (const collider of this.vrmBoneColliders)

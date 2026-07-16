@@ -56,10 +56,13 @@ describe('official VRM sample discovery', () => {
 
     expect(controller.status).toBe('ready')
     expect(controller.cloth).toHaveLength(1)
-    expect(controller.bodyColliders).toHaveLength(6)
+    expect(controller.garmentLayers).toHaveLength(1)
+    expect(controller.bodyColliders).toHaveLength(5)
     expect(source.geometry).not.toBe(originalGeometry)
     // Render-only UV/material seams are welded into one simulation proxy.
     expect(world.core.getPositions(controller.cloth[0].body).length / 3).toBe(313)
+    expect(world.core.getPositions(controller.garmentLayers[0]).length).toBeGreaterThan(0)
+    expect(controller.cloth[0].pinnedIndices.length).toBeGreaterThan(0)
 
     controller.dispose()
     expect(source.geometry).toBe(originalGeometry)
@@ -97,7 +100,9 @@ describe('official VRM sample discovery', () => {
 
     const positions = world.core.getPositions(body)
     let maximumDisplacement = 0
+    let lateralCenterX = 0
     for (let offset = 0; offset < positions.length; offset += 3) {
+      lateralCenterX += positions[offset] - initial[offset]
       maximumDisplacement = Math.max(maximumDisplacement, Math.hypot(
         positions[offset] - initial[offset],
         positions[offset + 1] - initial[offset + 1],
@@ -106,6 +111,10 @@ describe('official VRM sample discovery', () => {
     }
     expect(positions.every(Number.isFinite)).toBe(true)
     expect(maximumDisplacement).toBeLessThan(0.75)
+    const particleCount = positions.length / 3
+    // Depth changes as the authored flare hangs under gravity; lateral drift
+    // instead catches the asymmetric initialization failure seen in-browser.
+    expect(Math.abs(lateralCenterX / particleCount)).toBeLessThan(0.01)
     const average = (values: readonly number[]): number => values.reduce((sum, value) => sum + value, 0) / values.length
     const settlingMotion = average(rootMeanSquareDisplacements.slice(15, 30))
     const residualMotion = average(rootMeanSquareDisplacements.slice(-20))

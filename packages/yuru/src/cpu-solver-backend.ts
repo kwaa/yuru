@@ -24,6 +24,8 @@ import { DEFAULT_CLOTH_MATERIAL, DEFAULT_COLLISION_FILTER } from './types.js'
 interface BodyState {
   accelerations: Float32Array
   collisionCellSize: number
+  collisionLayer: number
+  collisionLayerAxis?: Vec3
   collisionThickness: number
   filter: CollisionFilter
   id: BodyId
@@ -224,6 +226,8 @@ export class CPUSolverBackend implements ClothBackend {
     this.bodies.set(id, {
       accelerations: new Float32Array(positions.length),
       collisionCellSize: collisionCellSize(spacing, materials),
+      collisionLayer: descriptor.collisionLayer ?? 0,
+      collisionLayerAxis: descriptor.collisionLayerAxis == null ? undefined : normalize(...readVec3(descriptor.collisionLayerAxis)),
       collisionThickness: thickness,
       filter: mergeFilter(descriptor.collisionFilter),
       id,
@@ -804,29 +808,35 @@ export class CPUSolverBackend implements ClothBackend {
         ))
         if (cell == null)
           continue
-        let tested = 0
-        for (const candidateIndex of cell) {
-          if (tested >= maxCandidates)
-            break
-          const candidate = candidates[candidateIndex]
-          const triangleBody = candidate.body
-          if (triangleBody === vertexBody && !vertexBody.selfCollision)
-            continue
-          if (triangleBody !== vertexBody && !filtersCollide(vertexBody.filter, triangleBody.filter))
-            continue
-          const a = triangleBody.indices[candidate.offset]
-          const b = triangleBody.indices[candidate.offset + 1]
-          const c = triangleBody.indices[candidate.offset + 2]
-          if (triangleBody === vertexBody && (
-            particle === a || particle === b || particle === c
-            || isWithinTwoRings(vertexBody.topology, particle, a)
-            || isWithinTwoRings(vertexBody.topology, particle, b)
-            || isWithinTwoRings(vertexBody.topology, particle, c)
-          )) {
-            continue
+        // Inter-garment contacts must not be starved by a dense set of
+        // self-collision candidates that happened to enter the cell first.
+        for (const sameBodyPass of [false, true]) {
+          let tested = 0
+          for (const candidateIndex of cell) {
+            if (tested >= maxCandidates)
+              break
+            const candidate = candidates[candidateIndex]
+            const triangleBody = candidate.body
+            if ((triangleBody === vertexBody) !== sameBodyPass)
+              continue
+            if (sameBodyPass && !vertexBody.selfCollision)
+              continue
+            if (!sameBodyPass && !filtersCollide(vertexBody.filter, triangleBody.filter))
+              continue
+            const a = triangleBody.indices[candidate.offset]
+            const b = triangleBody.indices[candidate.offset + 1]
+            const c = triangleBody.indices[candidate.offset + 2]
+            if (sameBodyPass && (
+              particle === a || particle === b || particle === c
+              || isWithinTwoRings(vertexBody.topology, particle, a)
+              || isWithinTwoRings(vertexBody.topology, particle, b)
+              || isWithinTwoRings(vertexBody.topology, particle, c)
+            )) {
+              continue
+            }
+            tested++
+            this.solveVertexTriangle(vertexBody, particle, triangleBody, candidate.offset)
           }
-          tested++
-          this.solveVertexTriangle(vertexBody, particle, triangleBody, candidate.offset)
         }
       }
     }
@@ -970,6 +980,11 @@ export class CPUSolverBackend implements ClothBackend {
           else if (!filtersCollide(first.body.filter, second.body.filter)) {
             continue
           }
+          else if (first.body.collisionLayer !== second.body.collisionLayer) {
+            // Ordered layers use oriented vertex/triangle contacts. An
+            // unsigned edge/edge normal would lose which garment is outside.
+            continue
+          }
           this.solveEdgeEdge(first.body, first.a, first.b, second.body, second.a, second.b)
         }
       }
@@ -1025,6 +1040,9 @@ export class CPUSolverBackend implements ClothBackend {
         return
       initialPenetration = Math.max(0, target - previousLength)
     }
+    else {
+      initialPenetration = Math.max(0, target - previousLength)
+    }
     if (length >= EPSILON) {
       dx /= length
       dy /= length
@@ -1075,7 +1093,9 @@ export class CPUSolverBackend implements ClothBackend {
     const normalCorrection = limitedDepenetration(
       target - length,
       initialPenetration,
-      firstBody === secondBody ? firstBody.maximumSelfCollisionDepenetration : Number.POSITIVE_INFINITY,
+      firstBody === secondBody
+        ? firstBody.maximumSelfCollisionDepenetration
+        : Math.min(firstBody.maximumSelfCollisionDepenetration, secondBody.maximumSelfCollisionDepenetration),
     )
     const correction = normalCorrection / denominator
     const particles = [[firstBody, a, 1 - closest[6], 1], [firstBody, b, closest[6], 1], [secondBody, c, 1 - closest[7], -1], [secondBody, d, closest[7], -1]] as const
@@ -1234,6 +1254,7 @@ export class CPUSolverBackend implements ClothBackend {
     this.applyFriction(body, particle, ...normal, descriptor.friction ?? body.materials[0].kineticFriction)
   }
 
+  // eslint-disable-next-line sonarjs/cognitive-complexity
   private solveVertexTriangle(vertexBody: BodyState, particle: number, triangleBody: BodyState, triangleOffset: number): void {
     const p = particle * 3
     const a = triangleBody.indices[triangleOffset]
@@ -1260,11 +1281,95 @@ export class CPUSolverBackend implements ClothBackend {
     let dy = vertexBody.positions[p + 1] - closest[1]
     let dz = vertexBody.positions[p + 2] - closest[2]
     let length = Math.hypot(dx, dy, dz)
-    const actualDistance = length
     const thickness = vertexBody.materials[0].thickness + materialForTriangle(triangleBody, triangleOffset / 3).thickness
-    if (length >= thickness)
-      return
-    let initialPenetration = 0
+    const orderedLayers = vertexBody !== triangleBody && vertexBody.collisionLayer !== triangleBody.collisionLayer
+    let contactDistance = thickness
+    let penetration = thickness - length
+    let previousDistance: number
+    const previousClosest = closestPointOnTriangle(
+      vertexBody.previous[p],
+      vertexBody.previous[p + 1],
+      vertexBody.previous[p + 2],
+      triangleBody.previous[ai],
+      triangleBody.previous[ai + 1],
+      triangleBody.previous[ai + 2],
+      triangleBody.previous[bi],
+      triangleBody.previous[bi + 1],
+      triangleBody.previous[bi + 2],
+      triangleBody.previous[ci],
+      triangleBody.previous[ci + 1],
+      triangleBody.previous[ci + 2],
+    )
+    if (orderedLayers) {
+      // A layer order chooses the side of a *nearby* surface; it must not turn
+      // every broad-phase triangle into an infinite separating plane.
+      if (length >= thickness * 2)
+        return
+      const abx = triangleBody.positions[bi] - triangleBody.positions[ai]
+      const aby = triangleBody.positions[bi + 1] - triangleBody.positions[ai + 1]
+      const abz = triangleBody.positions[bi + 2] - triangleBody.positions[ai + 2]
+      const acx = triangleBody.positions[ci] - triangleBody.positions[ai]
+      const acy = triangleBody.positions[ci + 1] - triangleBody.positions[ai + 1]
+      const acz = triangleBody.positions[ci + 2] - triangleBody.positions[ai + 2]
+      const side = vertexBody.collisionLayer > triangleBody.collisionLayer ? 1 : -1
+      dx = (aby * acz - abz * acy) * side
+      dy = (abz * acx - abx * acz) * side
+      dz = (abx * acy - aby * acx) * side
+      const layerAxis = triangleBody.collisionLayerAxis ?? vertexBody.collisionLayerAxis
+      if (layerAxis != null) {
+        const alongAxis = dx * layerAxis[0] + dy * layerAxis[1] + dz * layerAxis[2]
+        dx -= layerAxis[0] * alongAxis
+        dy -= layerAxis[1] * alongAxis
+        dz -= layerAxis[2] * alongAxis
+      }
+      const normalLength = Math.hypot(dx, dy, dz)
+      if (normalLength < EPSILON)
+        return
+      dx /= normalLength
+      dy /= normalLength
+      dz /= normalLength
+      const restClosest = closestPointOnTriangle(
+        vertexBody.initial[p],
+        vertexBody.initial[p + 1],
+        vertexBody.initial[p + 2],
+        triangleBody.initial[ai],
+        triangleBody.initial[ai + 1],
+        triangleBody.initial[ai + 2],
+        triangleBody.initial[bi],
+        triangleBody.initial[bi + 1],
+        triangleBody.initial[bi + 2],
+        triangleBody.initial[ci],
+        triangleBody.initial[ci + 1],
+        triangleBody.initial[ci + 2],
+      )
+      const restDistance = (vertexBody.initial[p] - restClosest[0]) * dx
+        + (vertexBody.initial[p + 1] - restClosest[1]) * dy
+        + (vertexBody.initial[p + 2] - restClosest[2]) * dz
+      // Preserve an authored gap that is narrower than the nominal cloth
+      // thickness. Expanding every initial garment overlap on every step
+      // creates artificial skirt volume and slowly pushes pleats sideways.
+      contactDistance = Math.max(0, Math.min(thickness, restDistance))
+      const orientedDistance = (vertexBody.positions[p] - closest[0]) * dx
+        + (vertexBody.positions[p + 1] - closest[1]) * dy
+        + (vertexBody.positions[p + 2] - closest[2]) * dz
+      if (orientedDistance >= contactDistance)
+        return
+      penetration = contactDistance - orientedDistance
+      previousDistance = (vertexBody.previous[p] - previousClosest[0]) * dx
+        + (vertexBody.previous[p + 1] - previousClosest[1]) * dy
+        + (vertexBody.previous[p + 2] - previousClosest[2]) * dz
+      length = 1
+    }
+    else {
+      if (length >= thickness)
+        return
+      previousDistance = Math.hypot(
+        vertexBody.previous[p] - previousClosest[0],
+        vertexBody.previous[p + 1] - previousClosest[1],
+        vertexBody.previous[p + 2] - previousClosest[2],
+      )
+    }
+    const initialPenetration = Math.max(0, contactDistance - previousDistance)
     if (vertexBody === triangleBody) {
       const restClosest = closestPointOnTriangle(
         vertexBody.initial[p],
@@ -1289,25 +1394,6 @@ export class CPUSolverBackend implements ClothBackend {
       // coincident rest surfaces as topology, not as an initial collision.
       if (restDistance < thickness * 1.25)
         return
-      const previousClosest = closestPointOnTriangle(
-        vertexBody.previous[p],
-        vertexBody.previous[p + 1],
-        vertexBody.previous[p + 2],
-        triangleBody.previous[ai],
-        triangleBody.previous[ai + 1],
-        triangleBody.previous[ai + 2],
-        triangleBody.previous[bi],
-        triangleBody.previous[bi + 1],
-        triangleBody.previous[bi + 2],
-        triangleBody.previous[ci],
-        triangleBody.previous[ci + 1],
-        triangleBody.previous[ci + 2],
-      )
-      initialPenetration = Math.max(0, thickness - Math.hypot(
-        vertexBody.previous[p] - previousClosest[0],
-        vertexBody.previous[p + 1] - previousClosest[1],
-        vertexBody.previous[p + 2] - previousClosest[2],
-      ))
     }
     if (length < EPSILON) {
       const abx = triangleBody.positions[bi] - triangleBody.positions[ai]
@@ -1330,9 +1416,11 @@ export class CPUSolverBackend implements ClothBackend {
     if (denominator < EPSILON)
       return
     const normalCorrection = limitedDepenetration(
-      thickness - actualDistance,
+      penetration,
       initialPenetration,
-      vertexBody === triangleBody ? vertexBody.maximumSelfCollisionDepenetration : Number.POSITIVE_INFINITY,
+      vertexBody === triangleBody
+        ? vertexBody.maximumSelfCollisionDepenetration
+        : Math.min(vertexBody.maximumSelfCollisionDepenetration, triangleBody.maximumSelfCollisionDepenetration),
     )
     const correction = normalCorrection / denominator
     const particleCorrectionX = nx * correction * wp
