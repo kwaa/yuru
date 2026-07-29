@@ -20,6 +20,8 @@ export interface CPUBackendOptions {
   integrationKernel?: CpuIntegrationKernel
   /** Defaults to a dedicated module Worker when the runtime supports it. */
   worker?: boolean | CPUWorkerLike
+  /** Identifies a custom Worker implementation such as the WASM backend. */
+  workerCapabilities?: BackendCapabilities
 }
 
 export interface CPUWorkerLike {
@@ -32,6 +34,7 @@ export interface CPUWorkerLike {
 interface BodyMirror {
   initial: Float32Array
   positions: Float32Array
+  sharedWithWorker: boolean
 }
 
 interface ErrorResponse {
@@ -41,13 +44,42 @@ interface ErrorResponse {
   type: 'error'
 }
 
+interface PendingStep {
+  reject: (error: Error) => void
+  resolve: () => void
+  signal?: Int32Array
+}
+
 interface StepResponse {
   positions: [BodyId, Float32Array][]
   requestId: number
   type: 'step'
 }
 
-type WorkerResponse = ErrorResponse | StepResponse
+interface WorkerReadyResponse {
+  type: 'ready'
+}
+
+type WorkerResponse = ErrorResponse | StepResponse | WorkerReadyResponse
+
+const supportsSharedTransport = (): boolean =>
+  typeof SharedArrayBuffer !== 'undefined'
+  && typeof Atomics !== 'undefined'
+  && typeof Atomics.waitAsync === 'function'
+
+const createPositions = (source: Float32Array, shared: boolean): Float32Array => {
+  const positions = shared
+    ? new Float32Array(new SharedArrayBuffer(source.byteLength))
+    : new Float32Array(source.length)
+  positions.set(source)
+  return positions
+}
+
+const isSharedTransportError = (error: unknown): boolean => {
+  if (typeof error !== 'object' || error == null || !('name' in error))
+    return false
+  return error.name === 'DataCloneError' || error.name === 'SecurityError'
+}
 
 const workerCapabilities: BackendCapabilities = {
   continuousCollision: true,
@@ -114,7 +146,8 @@ export class CPUBackend implements ClothBackend {
   private nextColliderId = 1
   private nextGrabId = 1
   private nextRequestId = 1
-  private readonly pending = new Map<number, { reject: (error: Error) => void, resolve: () => void }>()
+  private readonly pending = new Map<number, PendingStep>()
+  private sharedTransport = false
   private readonly worker?: CPUWorkerLike
 
   constructor(options: CPUBackendOptions = {}) {
@@ -130,7 +163,18 @@ export class CPUBackend implements ClothBackend {
       return
     }
     this.worker = worker
-    this.capabilities = workerCapabilities
+    this.capabilities = options.workerCapabilities ?? workerCapabilities
+    if (supportsSharedTransport()) {
+      try {
+        // Construction is a stricter capability check than the global alone in
+        // runtimes that gate shared memory behind cross-origin isolation.
+        this.sharedTransport = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT).byteLength
+          === Int32Array.BYTES_PER_ELEMENT
+      }
+      catch {
+        // Some runtimes expose SharedArrayBuffer without allowing it in the current security context.
+      }
+    }
     worker.onmessage = event => this.handleMessage(event.data as WorkerResponse)
     worker.onerror = (event) => {
       this.fail(new Error(event.message ?? 'Yuru CPU Worker failed'))
@@ -142,10 +186,20 @@ export class CPUBackend implements ClothBackend {
       return this.direct.addBody(descriptor)
     this.assertActive()
     validateBody(descriptor)
-    const id = this.nextBodyId++
-    const positions = descriptor.mesh.positions.slice()
-    this.bodies.set(id, { initial: positions.slice(), positions })
-    this.post({ descriptor, id, type: 'addBody' })
+    const id = this.nextBodyId
+    const positions = createPositions(descriptor.mesh.positions, this.sharedTransport)
+    let sharedWithWorker = false
+    if (!this.sharedTransport) {
+      this.post({ descriptor, id, type: 'addBody' })
+    }
+    else {
+      sharedWithWorker = this.postShared(
+        { descriptor, id, sharedPositions: positions, type: 'addBody' },
+        { descriptor, id, type: 'addBody' },
+      )
+    }
+    this.bodies.set(id, { initial: positions.slice(), positions, sharedWithWorker })
+    this.nextBodyId++
     return id
   }
 
@@ -153,8 +207,9 @@ export class CPUBackend implements ClothBackend {
     if (this.direct != null)
       return this.direct.addCollider(descriptor)
     this.assertActive()
-    const id = this.nextColliderId++
+    const id = this.nextColliderId
     this.post({ descriptor, id, type: 'addCollider' })
+    this.nextColliderId++
     return id
   }
 
@@ -163,8 +218,9 @@ export class CPUBackend implements ClothBackend {
       return this.direct.addGrab(descriptor)
     this.assertActive()
     this.requireBody(descriptor.body)
-    const id = this.nextGrabId++
+    const id = this.nextGrabId
     this.post({ descriptor, id, type: 'addGrab' })
+    this.nextGrabId++
     return id
   }
 
@@ -189,8 +245,8 @@ export class CPUBackend implements ClothBackend {
     }
     this.assertActive()
     this.requireBody(id)
-    this.bodies.delete(id)
     this.post({ id, type: 'removeBody' })
+    this.bodies.delete(id)
   }
 
   removeCollider(id: ColliderId): void {
@@ -221,8 +277,12 @@ export class CPUBackend implements ClothBackend {
     const source = positions ?? body.initial
     if (source.length !== body.positions.length)
       throw new RangeError('Reset positions do not match the body particle count')
-    body.positions.set(source)
     this.post({ id, positions, type: 'resetBody' })
+    // A shared body is updated by the Worker after all earlier commands. A
+    // main-thread write here would race an in-flight solve and violate that
+    // ordering. Transfer-mode mirrors are independent and still need updating.
+    if (!body.sharedWithWorker || this.pending.size === 0)
+      body.positions.set(source)
   }
 
   setMotionConstraintTargets(id: BodyId, positions: Float32Array): void {
@@ -259,8 +319,26 @@ export class CPUBackend implements ClothBackend {
     this.assertActive()
     const requestId = this.nextRequestId++
     return new Promise<void>((resolve, reject) => {
-      this.pending.set(requestId, { reject, resolve })
-      this.post({ delta, options, requestId, type: 'step' })
+      const signal = this.sharedTransport
+        ? new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+        : undefined
+      this.pending.set(requestId, { reject, resolve, signal })
+      try {
+        if (signal == null) {
+          this.post({ delta, options, requestId, type: 'step' })
+          return
+        }
+        if (this.postShared(
+          { delta, options, requestId, signal, type: 'step' },
+          { delta, options, requestId, type: 'step' },
+        )) {
+          void this.waitForSharedStep(requestId, signal)
+        }
+      }
+      catch (error) {
+        this.pending.delete(requestId)
+        reject(error)
+      }
     })
   }
 
@@ -291,12 +369,22 @@ export class CPUBackend implements ClothBackend {
 
   private fail(error: Error): void {
     this.fatalError = error
-    for (const pending of this.pending.values())
+    for (const pending of this.pending.values()) {
       pending.reject(error)
+      if (pending.signal != null)
+        Atomics.notify(pending.signal, 0)
+    }
     this.pending.clear()
   }
 
   private handleMessage(message: WorkerResponse): void {
+    // A WASM worker can finish its module handshake on an adapter that was
+    // already attached to this backend during HMR. Control responses are not
+    // step snapshots and must never fall through to the snapshot path.
+    if (message.type === 'ready')
+      return
+    if (message.type !== 'step' && message.type !== 'error')
+      return
     if (message.type === 'error') {
       const error = new Error(message.message)
       if (message.stack != null)
@@ -305,18 +393,38 @@ export class CPUBackend implements ClothBackend {
         this.fail(error)
         return
       }
-      this.pending.get(message.requestId)?.reject(error)
+      const pending = this.pending.get(message.requestId)
+      pending?.reject(error)
       this.pending.delete(message.requestId)
+      if (pending?.signal != null)
+        Atomics.notify(pending.signal, 0)
       return
     }
     for (const [id, positions] of message.positions)
       this.bodies.get(id)?.positions.set(positions)
-    this.pending.get(message.requestId)?.resolve()
+    const pending = this.pending.get(message.requestId)
+    pending?.resolve()
     this.pending.delete(message.requestId)
+    if (pending?.signal != null)
+      Atomics.notify(pending.signal, 0)
   }
 
   private post(message: unknown): void {
     this.worker?.postMessage(message)
+  }
+
+  private postShared(message: unknown, fallback: unknown): boolean {
+    try {
+      this.post(message)
+      return true
+    }
+    catch (error) {
+      if (!isSharedTransportError(error))
+        throw error
+      this.sharedTransport = false
+      this.post(fallback)
+      return false
+    }
   }
 
   private requireBody(id: BodyId): BodyMirror {
@@ -324,5 +432,19 @@ export class CPUBackend implements ClothBackend {
     if (body == null)
       throw new RangeError(`Unknown cloth body ${id}`)
     return body
+  }
+
+  private async waitForSharedStep(requestId: number, signal: Int32Array): Promise<void> {
+    while (this.pending.has(requestId)) {
+      const completed = Atomics.load(signal, 0)
+      if (completed !== 0) {
+        this.pending.get(requestId)?.resolve()
+        this.pending.delete(requestId)
+        return
+      }
+      const wait = Atomics.waitAsync(signal, 0, 0)
+      if (wait.async)
+        await wait.value
+    }
   }
 }

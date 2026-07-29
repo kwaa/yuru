@@ -10,6 +10,7 @@ import type {
   ColliderId,
   CollisionFilter,
   CpuIntegrationKernel,
+  CpuSolverBodyState,
   ForceField,
   GrabDescriptor,
   GrabId,
@@ -21,7 +22,7 @@ import { closestPointOnSegment, closestPointOnTriangle, EPSILON, inverseRotate, 
 import { buildTethers, buildTopology, isWithinTwoRings, STRETCH_EDGE } from './topology.js'
 import { DEFAULT_CLOTH_MATERIAL, DEFAULT_COLLISION_FILTER } from './types.js'
 
-interface BodyState {
+interface BodyState extends CpuSolverBodyState {
   accelerations: Float32Array
   collisionCellSize: number
   collisionLayer: number
@@ -234,7 +235,7 @@ export class CPUSolverBackend implements ClothBackend {
   }
 
   // eslint-disable-next-line sonarjs/cognitive-complexity -- Descriptor validation and typed-array state cooking are intentionally colocated.
-  addBody(descriptor: ClothBodyDescriptor): BodyId {
+  addBody(descriptor: ClothBodyDescriptor, positionStorage?: Float32Array): BodyId {
     const { mesh } = descriptor
     if (mesh.positions.length === 0 || mesh.positions.length % 3 !== 0)
       throw new RangeError('Cloth positions must contain packed xyz values')
@@ -256,7 +257,11 @@ export class CPUSolverBackend implements ClothBackend {
       }
     }
 
-    const positions = mesh.positions.slice()
+    if (positionStorage != null && positionStorage.length !== mesh.positions.length)
+      throw new RangeError('Position storage must match the body particle count')
+    const positions = positionStorage ?? mesh.positions.slice()
+    if (positionStorage != null)
+      positions.set(mesh.positions)
     const materials = descriptor.materials != null && descriptor.materials.length > 0
       ? descriptor.materials.map(mergeMaterial)
       : [mergeMaterial()]
@@ -366,6 +371,9 @@ export class CPUSolverBackend implements ClothBackend {
   }
 
   removeBody(id: BodyId): void {
+    if (!this.bodies.has(id))
+      return
+    this.integrationKernel?.removeBody?.(id)
     this.bodies.delete(id)
     for (const [grabId, grab] of this.grabs) {
       if (grab.body === id)
@@ -428,14 +436,17 @@ export class CPUSolverBackend implements ClothBackend {
 
     for (let substep = 0; substep < substeps; substep++) {
       for (const body of this.bodies.values()) {
+        this.configureSelfCollisionSpeed(body, subDelta, collisionInterval, substeps, options.speedLimit)
         this.applyTargets(body)
         const prediction = this.predict(body, subDelta, options.gravity, options.forceFields)
         if (prediction != null)
           await prediction
-        this.limitSelfCollisionSpeed(body, subDelta, collisionInterval, substeps, options.speedLimit)
-        this.solveTethers(body)
-        this.solveDistanceConstraints(body, subDelta)
-        this.solveAreaConstraints(body, subDelta)
+        if (this.integrationKernel?.integratesStructuralConstraints !== true) {
+          this.limitSelfCollisionSpeed(body)
+          this.solveTethers(body)
+          this.solveDistanceConstraints(body, subDelta)
+          this.solveAreaConstraints(body, subDelta)
+        }
         this.solveGrabs(body, subDelta)
         this.solveMotionConstraints(body)
       }
@@ -455,8 +466,28 @@ export class CPUSolverBackend implements ClothBackend {
       const shouldCollide = (substep + 1) % collisionInterval === 0 || substep === substeps - 1
       if (shouldCollide) {
         for (let iteration = 0; iteration < options.quality.collisionIterations; iteration++) {
-          this.solveBodyCollisions(options.quality.maxCollisionCandidates)
-          this.solveEdgeCollisions(options.quality.maxCollisionCandidates)
+          if (this.integrationKernel?.solveBodyCollisions == null) {
+            this.solveBodyCollisions(options.quality.maxCollisionCandidates)
+          }
+          else {
+            const collision = this.integrationKernel.solveBodyCollisions(
+              [...this.bodies.values()],
+              options.quality.maxCollisionCandidates,
+            )
+            if (collision != null)
+              await collision
+          }
+          if (this.integrationKernel?.solveEdgeCollisions == null) {
+            this.solveEdgeCollisions(options.quality.maxCollisionCandidates)
+          }
+          else {
+            const collision = this.integrationKernel.solveEdgeCollisions(
+              [...this.bodies.values()],
+              options.quality.maxCollisionCandidates,
+            )
+            if (collision != null)
+              await collision
+          }
           for (const body of this.bodies.values())
             this.solveExternalColliders(body, false, 0, 0)
         }
@@ -487,14 +518,9 @@ export class CPUSolverBackend implements ClothBackend {
     grab.position = readVec3(position)
   }
 
-  private applyAerodynamics(body: BodyState, delta: number, forceFields: readonly ForceField[]): void {
-    const winds = forceFields.filter((field): field is Extract<ForceField, { type: 'wind' }> => field.type === 'wind')
-    if (winds.length === 0)
+  private applyAerodynamics(body: BodyState, delta: number, wind?: Vec3): void {
+    if (wind == null)
       return
-    const wind = winds.reduce<Vec3>((sum, field) => {
-      const velocity = readVec3(field.velocity)
-      return [sum[0] + velocity[0], sum[1] + velocity[1], sum[2] + velocity[2]]
-    }, [0, 0, 0])
     for (let offset = 0; offset < body.indices.length; offset += 3) {
       const a = body.indices[offset]
       const b = body.indices[offset + 1]
@@ -642,7 +668,7 @@ export class CPUSolverBackend implements ClothBackend {
     }
   }
 
-  private limitSelfCollisionSpeed(
+  private configureSelfCollisionSpeed(
     body: BodyState,
     delta: number,
     collisionInterval: number,
@@ -667,7 +693,10 @@ export class CPUSolverBackend implements ClothBackend {
       ? maximumDisplacement
       : Math.max(EPSILON, depenetrationScale) / substepCount
     body.maximumSelfCollisionDisplacement = maximumDisplacement
-    const maximumSquared = maximumDisplacement * maximumDisplacement
+  }
+
+  private limitSelfCollisionSpeed(body: BodyState): void {
+    const maximumSquared = body.maximumSelfCollisionDisplacement * body.maximumSelfCollisionDisplacement
     for (let particle = 0; particle < body.inverseMasses.length; particle++) {
       if (body.inverseMasses[particle] === 0)
         continue
@@ -678,7 +707,7 @@ export class CPUSolverBackend implements ClothBackend {
       const distanceSquared = dx * dx + dy * dy + dz * dz
       if (distanceSquared <= maximumSquared)
         continue
-      const scale = maximumDisplacement / Math.sqrt(distanceSquared)
+      const scale = body.maximumSelfCollisionDisplacement / Math.sqrt(distanceSquared)
       body.positions[offset] = body.previous[offset] + dx * scale
       body.positions[offset + 1] = body.previous[offset + 1] + dy * scale
       body.positions[offset + 2] = body.previous[offset + 2] + dz * scale
@@ -688,6 +717,7 @@ export class CPUSolverBackend implements ClothBackend {
   private predict(body: BodyState, delta: number, gravity: Vec3, forceFields: readonly ForceField[]): Promise<void> | void {
     const deltaSquared = delta * delta
     const damping = Math.max(0, Math.min(1, body.materials[0].damping))
+    const wind = this.windVelocity(forceFields)
     const accelerations = body.accelerations
     for (let i = 0; i < body.inverseMasses.length; i++) {
       const offset = i * 3
@@ -708,9 +738,22 @@ export class CPUSolverBackend implements ClothBackend {
       accelerations[offset + 2] = az
     }
     if (this.integrationKernel != null) {
-      const result = this.integrationKernel.integrate(body.positions, body.previous, body.inverseMasses, accelerations, delta, damping)
+      const result = this.integrationKernel.integrate(
+        body.positions,
+        body.previous,
+        body.inverseMasses,
+        accelerations,
+        delta,
+        damping,
+        body,
+        wind,
+      )
       if (result != null) {
-        return result.then(() => this.applyAerodynamics(body, delta, forceFields))
+        return result.then(() => {
+          if (this.integrationKernel?.integratesAerodynamics === true)
+            return
+          this.applyAerodynamics(body, delta, wind)
+        })
       }
     }
     else {
@@ -732,7 +775,8 @@ export class CPUSolverBackend implements ClothBackend {
         body.positions[offset + 2] = z + vz + accelerations[offset + 2] * deltaSquared
       }
     }
-    this.applyAerodynamics(body, delta, forceFields)
+    if (this.integrationKernel?.integratesAerodynamics !== true)
+      this.applyAerodynamics(body, delta, wind)
   }
 
   private requireBody(id: BodyId): BodyState {
@@ -1886,5 +1930,22 @@ export class CPUSolverBackend implements ClothBackend {
         + Math.abs(currentShape.radius - previousShape.radius) * fraction
     }
     return particleMotion
+  }
+
+  private windVelocity(forceFields: readonly ForceField[]): undefined | Vec3 {
+    let x = 0
+    let y = 0
+    let z = 0
+    let hasWind = false
+    for (const field of forceFields) {
+      if (field.type !== 'wind')
+        continue
+      const velocity = readVec3(field.velocity)
+      x += velocity[0]
+      y += velocity[1]
+      z += velocity[2]
+      hasWind = true
+    }
+    return hasWind ? [x, y, z] : undefined
   }
 }

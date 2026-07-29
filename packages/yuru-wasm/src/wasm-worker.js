@@ -1,6 +1,10 @@
-import { CPUSolverBackend } from './cpu-solver-backend.js'
+import { CPUSolverBackend } from 'yuru'
 
-const backend = new CPUSolverBackend()
+import { WasmIntegrationKernel } from './index.js'
+
+import * as wasmModule from './generated/single/yuru_wasm_single.js'
+
+const backend = new CPUSolverBackend(new WasmIntegrationKernel(wasmModule))
 const bodies = new Map()
 
 const respondWithError = (error, requestId) => {
@@ -16,12 +20,12 @@ const respondWithError = (error, requestId) => {
 const addBody = (data) => {
   const id = backend.addBody(data.descriptor, data.sharedPositions)
   if (id !== data.id)
-    throw new Error(`CPU Worker body id desynchronized: ${id} !== ${data.id}`)
+    throw new Error(`WASM Worker body id desynchronized: ${id} !== ${data.id}`)
   if (data.sharedPositions != null) {
     if (!(data.sharedPositions instanceof Float32Array))
-      throw new TypeError('CPU Worker shared positions must be a Float32Array')
+      throw new TypeError('WASM Worker shared positions must be a Float32Array')
     if (data.sharedPositions.length !== backend.getPositions(id).length)
-      throw new RangeError(`CPU Worker shared positions do not match body ${id}`)
+      throw new RangeError(`WASM Worker shared positions do not match body ${id}`)
   }
   bodies.set(id, data.sharedPositions)
 }
@@ -48,13 +52,13 @@ const handleCommand = async (data) => {
     case 'addCollider': {
       const id = backend.addCollider(data.descriptor)
       if (id !== data.id)
-        throw new Error(`CPU Worker collider id desynchronized: ${id} !== ${data.id}`)
+        throw new Error(`WASM Worker collider id desynchronized: ${id} !== ${data.id}`)
       break
     }
     case 'addGrab': {
       const id = backend.addGrab(data.descriptor)
       if (id !== data.id)
-        throw new Error(`CPU Worker grab id desynchronized: ${id} !== ${data.id}`)
+        throw new Error(`WASM Worker grab id desynchronized: ${id} !== ${data.id}`)
       break
     }
     case 'removeBody':
@@ -86,7 +90,7 @@ const handleCommand = async (data) => {
       backend.updateGrab(data.id, data.position)
       break
     default:
-      throw new Error(`Unknown CPU Worker command: ${data.type}`)
+      throw new Error(`Unknown WASM Worker command: ${data.type}`)
   }
 }
 
@@ -96,3 +100,5 @@ globalThis.onmessage = ({ data }) => {
     .then(() => handleCommand(data))
     .catch(error => respondWithError(error, data.requestId))
 }
+
+globalThis.postMessage({ type: 'ready' })

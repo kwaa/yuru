@@ -5,6 +5,10 @@ extern crate alloc;
 use alloc::vec::Vec;
 use wasm_bindgen::prelude::*;
 
+mod collision;
+mod solver;
+pub use solver::WasmSolver;
+
 #[cfg(target_arch = "wasm32")]
 #[global_allocator]
 static ALLOCATOR: dlmalloc::GlobalDlmalloc = dlmalloc::GlobalDlmalloc;

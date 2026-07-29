@@ -1,5 +1,5 @@
-import { Box3, BufferAttribute, BufferGeometry, Matrix4, Mesh, MeshBasicMaterial, Plane, PlaneGeometry, Sphere, Vector3 } from 'three'
-import { describe, expect, it } from 'vitest'
+import { Box3, BufferAttribute, BufferGeometry, DynamicDrawUsage, Matrix4, Mesh, MeshBasicMaterial, Plane, PlaneGeometry, Sphere, Vector3 } from 'three'
+import { describe, expect, it, vi } from 'vitest'
 
 import { createThreeYuruWorld } from '../src/index.js'
 import { colliderFromThree } from '../src/shapes.js'
@@ -126,6 +126,90 @@ describe('three mesh binding', () => {
     world.dispose()
     geometry.dispose()
     proxyGeometry.dispose()
+    material.dispose()
+  })
+
+  it('updates packed dynamic attributes with Three-compatible vertex normals', () => {
+    const geometry = new BufferGeometry()
+    geometry.setAttribute('position', new BufferAttribute(new Float32Array([
+      -1,
+      -1,
+      0,
+      1,
+      -1,
+      0,
+      1,
+      1,
+      0,
+      -1,
+      1,
+      0,
+    ]), 3))
+    geometry.setIndex([0, 1, 2, 0, 2, 3])
+    const material = new MeshBasicMaterial()
+    const mesh = new Mesh(geometry, material)
+    mesh.position.set(2, -1, 3)
+    mesh.rotation.set(0.2, -0.4, 0.1)
+    mesh.scale.set(1.2, 0.8, 1.1)
+    const world = createThreeYuruWorld()
+    const controller = world.attachCloth(mesh, { pin: false })
+    const worldPositions = world.core.getPositions(controller.body).slice()
+    worldPositions[1] += 0.5
+    worldPositions[5] -= 0.25
+    worldPositions[8] += 0.75
+    world.core.resetBody(controller.body, worldPositions)
+
+    mesh.updateWorldMatrix(true, false)
+    const worldToLocal = new Matrix4().copy(mesh.matrixWorld).invert()
+    const expectedGeometry = geometry.clone()
+    const expectedPosition = expectedGeometry.getAttribute('position')
+    const point = new Vector3()
+    for (let index = 0; index < expectedPosition.count; index++) {
+      point.fromArray(worldPositions, index * 3).applyMatrix4(worldToLocal)
+      expectedPosition.setXYZ(index, point.x, point.y, point.z)
+    }
+    expectedGeometry.computeVertexNormals()
+
+    controller.syncVisual()
+
+    const position = geometry.getAttribute('position')
+    const normal = geometry.getAttribute('normal')
+    expect([...position.array]).toEqual([...expectedPosition.array])
+    expect([...normal.array]).toEqual([...expectedGeometry.getAttribute('normal').array])
+    if (!(position instanceof BufferAttribute) || !(normal instanceof BufferAttribute))
+      throw new TypeError('Expected packed buffer attributes')
+    expect(position.usage).toBe(DynamicDrawUsage)
+    expect(normal.usage).toBe(DynamicDrawUsage)
+    expect(position.updateRanges).toEqual([{ count: position.array.length, start: 0 }])
+    expect(normal.updateRanges).toEqual([{ count: normal.array.length, start: 0 }])
+
+    controller.syncVisual()
+    expect(geometry.getAttribute('normal')).toBe(normal)
+    expect(position.updateRanges).toHaveLength(1)
+    expect(normal.updateRanges).toHaveLength(1)
+
+    world.dispose()
+    expectedGeometry.dispose()
+    geometry.dispose()
+    material.dispose()
+  })
+
+  it('updates a shared simulation world matrix only once for animated targets', () => {
+    const geometry = new PlaneGeometry(1, 1, 2, 2)
+    const material = new MeshBasicMaterial()
+    const mesh = new Mesh(geometry, material)
+    const world = createThreeYuruWorld()
+    const controller = world.attachCloth(mesh, {
+      motionConstraints: { maximumDistances: new Float32Array(9).fill(1) },
+      pinTopRatio: 0.01,
+    })
+    const updateWorldMatrix = vi.spyOn(mesh, 'updateWorldMatrix')
+
+    controller.updateKinematicTargets()
+
+    expect(updateWorldMatrix).toHaveBeenCalledTimes(1)
+    world.dispose()
+    geometry.dispose()
     material.dispose()
   })
 })

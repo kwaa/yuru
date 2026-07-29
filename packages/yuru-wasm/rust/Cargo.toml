@@ -25,4 +25,5 @@ wasm-opt = [
   "-O3",
   "--enable-simd",
   "--enable-bulk-memory-opt",
+  "--enable-nontrapping-float-to-int",
 ]

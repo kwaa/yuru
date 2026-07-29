@@ -203,7 +203,7 @@ export const QUALITY_PRESETS: Readonly<Record<QualityPreset, Readonly<QualityPro
     substeps: 2,
   }),
   medium: Object.freeze({
-    collisionEverySubsteps: 2,
+    collisionEverySubsteps: 4,
     collisionIterations: 1,
     continuousCollision: false,
     maxCatchUpSteps: 3,
@@ -256,7 +256,7 @@ export interface ClothWorldOptions {
   speedLimit?: ClothSpeedLimit
 }
 
-/** Optional numeric kernel used by CPU backends without exposing solver state. */
+/** Optional numeric kernel used by CPU backends. */
 export interface CpuIntegrationKernel {
   readonly capabilities: BackendCapabilities
   dispose?: () => void
@@ -267,7 +267,67 @@ export interface CpuIntegrationKernel {
     accelerations: Float32Array,
     delta: number,
     damping: number,
+    body?: CpuSolverBodyState,
+    wind?: Vec3,
   ) => Promise<void> | void
+  /** When true, `integrate` applies the supplied wind before structural constraints. */
+  readonly integratesAerodynamics?: boolean
+  /**
+   * When true, `integrate` also performs speed limiting, tethers, distance
+   * constraints, and area constraints in their normal solver order.
+   */
+  readonly integratesStructuralConstraints?: boolean
+  /** Releases any persistent native state associated with a removed body. */
+  removeBody?: (id: BodyId) => void
+  /** Optional vertex/triangle collision batch. Static body data may be cached. */
+  solveBodyCollisions?: (
+    bodies: readonly CpuSolverBodyState[],
+    maxCandidates: number,
+  ) => Promise<void> | void
+  /** Optional edge/edge collision batch. Static body data may be cached. */
+  solveEdgeCollisions?: (
+    bodies: readonly CpuSolverBodyState[],
+    maxCandidates: number,
+  ) => Promise<void> | void
+}
+
+/**
+ * Packed solver state exposed only to advanced numeric kernels. Static
+ * topology arrays may be retained by a kernel so they cross the JS/WASM
+ * boundary once when a body is first seen instead of once per substep.
+ */
+export interface CpuSolverBodyState {
+  readonly collisionCellSize: number
+  readonly collisionLayer: number
+  readonly collisionLayerAxis?: Vec3
+  readonly filter: CollisionFilter
+  readonly id: BodyId
+  readonly indices: Uint16Array | Uint32Array
+  readonly initial: Float32Array
+  readonly inverseMasses: Float32Array
+  readonly materials: readonly ClothMaterial[]
+  maximumSelfCollisionDepenetration: number
+  maximumSelfCollisionDisplacement: number
+  readonly positions: Float32Array
+  readonly previous: Float32Array
+  readonly selfCollision: boolean
+  readonly tethers?: {
+    readonly topology: {
+      readonly anchors: Uint32Array
+      readonly lengths: Float32Array
+      readonly particles: Uint32Array
+    }
+  }
+  readonly topology: {
+    readonly adjacency: Uint32Array
+    readonly adjacencyOffsets: Uint32Array
+    readonly edgeKinds: Uint8Array
+    readonly edgeParticles: Uint32Array
+    readonly edgeRestLengths: Float32Array
+    readonly triangleParticles: Uint32Array
+    readonly triangleRestAreas: Float32Array
+  }
+  readonly triangleMaterialIndices?: Uint16Array
 }
 
 export interface RuntimeDiagnostics {
