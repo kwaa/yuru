@@ -43,6 +43,10 @@ const world = createClothWorld({ backend })
 
 There is no string-based backend selector and no implicit backend switch.
 
+On a cross-origin-isolated page, the Worker shares each position array through
+`SharedArrayBuffer` and signals completed steps with `Atomics`; otherwise it
+automatically falls back to transferable `postMessage` snapshots.
+
 ## Current solver features
 
 - Fixed-step accumulation with bounded catch-up.

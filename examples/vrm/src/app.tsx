@@ -49,7 +49,7 @@ export const App = () => {
     <>
       <Canvas shadows>
         <XR store={store}>
-          <YuruProvider options={{ backend, quality: 'high' }}>
+          <YuruProvider options={{ backend, quality: 'medium' }}>
             <BvhPhysicsWorld>
               <Sky />
               <directionalLight castShadow intensity={1.2} position={[5, 10, 10]} />

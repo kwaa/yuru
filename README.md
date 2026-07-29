@@ -16,7 +16,7 @@ needed to measure and improve simulation quality.
 | `yuru` | Renderer-independent cloth world, Worker-backed CPU backend, constraints, forces, grabs, and collision shapes. |
 | `three-yuru` | Three mesh binding, simulation proxies, TSL experiment, Rapier collider adapter, and pixiv/three-vrm integration. |
 | `react-three-yuru` | React Three Fiber provider and hooks for cloth, VRM, and Rapier. |
-| `yuru-wasm` | Separate optional Rust/WASM integration package. It is not required by the default CPU or TSL build. |
+| `yuru-wasm` | Optional Worker-backed Rust/WASM solver for structural constraints and cloth collision. |
 | `@yurujs/example-vrm` | Desktop/WebXR demo using the official `AvatarSample_B.vrm`. |
 
 ## Core API

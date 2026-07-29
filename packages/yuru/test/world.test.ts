@@ -1,3 +1,5 @@
+import type { CPUWorkerLike } from '../src/index'
+
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { CPUBackend, createClothWorld } from '../src/index'
@@ -7,6 +9,13 @@ const triangle = (inverseMasses = new Float32Array([0, 1, 1])) => ({
   inverseMasses,
   positions: new Float32Array([0, 1, 0, 1, 1, 0, 0, 0, 0]),
 })
+
+interface TestWorkerCommand {
+  requestId?: number
+  sharedPositions?: Float32Array
+  signal?: Int32Array
+  type?: string
+}
 
 describe('clothWorld', () => {
   afterEach(() => {
@@ -48,6 +57,308 @@ describe('clothWorld', () => {
     backend.dispose()
     expect(workers[0].terminated).toBe(true)
   })
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'shares body positions and completes Worker steps through Atomics',
+    async () => {
+      const messages: TestWorkerCommand[] = []
+      let rejectStep = false
+      let sharedPositions: Float32Array | undefined
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          messages.push(command)
+          if (command.type === 'addBody') {
+            sharedPositions = command.sharedPositions
+            return
+          }
+          if (command.type !== 'step')
+            return
+          if (sharedPositions == null || command.signal == null || command.requestId == null)
+            throw new Error('Expected a shared Worker step')
+          if (rejectStep) {
+            queueMicrotask(() => worker.onmessage?.({
+              data: {
+                message: 'Shared Worker step failed',
+                requestId: command.requestId,
+                type: 'error',
+              },
+            }))
+            return
+          }
+          sharedPositions[4] = 0.25
+          Atomics.store(command.signal, 0, command.requestId)
+          Atomics.notify(command.signal, 0)
+        },
+        terminate: vi.fn(),
+      }
+      const backend = new CPUBackend({ worker })
+      const world = createClothWorld({ backend })
+      const body = world.addBody({ mesh: triangle(), selfCollision: false })
+      worker.onmessage?.({ data: { type: 'ready' } })
+
+      expect(world.getPositions(body).buffer).toBeInstanceOf(SharedArrayBuffer)
+      await world.step(1 / 60)
+
+      expect(world.getPositions(body)[4]).toBe(0.25)
+      expect(messages.find(message => message.type === 'step')?.signal).toBeInstanceOf(Int32Array)
+      rejectStep = true
+      await expect(world.step(1 / 60)).rejects.toThrow('Shared Worker step failed')
+      world.dispose()
+    },
+  )
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'uses an independent completion signal for concurrent Worker steps',
+    async () => {
+      const signals: Int32Array[] = []
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          if (command.type === 'step' && command.signal != null)
+            signals.push(command.signal)
+        },
+        terminate: vi.fn(),
+      }
+      const backend = new CPUBackend({ worker })
+      backend.addBody({ mesh: triangle(), selfCollision: false })
+      const options = {
+        forceFields: [],
+        gravity: [0, 0, 0] as const,
+        quality: {
+          collisionEverySubsteps: 1,
+          collisionIterations: 0,
+          continuousCollision: false,
+          maxCatchUpSteps: 1,
+          maxCollisionCandidates: 1,
+          substeps: 1,
+        },
+        speedLimit: 'unlimited' as const,
+      }
+
+      let firstComplete = false
+      const first = backend.step(1 / 60, options) as Promise<void>
+      void first.then(() => {
+        firstComplete = true
+      })
+      const second = backend.step(1 / 60, options) as Promise<void>
+      await Promise.resolve()
+
+      expect(signals).toHaveLength(2)
+      expect(signals[0]).not.toBe(signals[1])
+      Atomics.store(signals[1], 0, 1)
+      Atomics.notify(signals[1], 0)
+      await second
+      expect(firstComplete).toBe(false)
+      Atomics.store(signals[0], 0, 1)
+      Atomics.notify(signals[0], 0)
+      await first
+      backend.dispose()
+    },
+  )
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'defers shared reset writes until the pending Worker step completes',
+    async () => {
+      let sharedPositions: Float32Array | undefined
+      let signal: Int32Array | undefined
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          if (command.type === 'addBody')
+            sharedPositions = command.sharedPositions
+          if (command.type === 'step')
+            signal = command.signal
+        },
+        terminate: vi.fn(),
+      }
+      const backend = new CPUBackend({ worker })
+      const id = backend.addBody({ mesh: triangle(), selfCollision: false })
+      const beforeReset = sharedPositions![4]
+      const pending = backend.step(1 / 60, {
+        forceFields: [],
+        gravity: [0, 0, 0] as const,
+        quality: {
+          collisionEverySubsteps: 1,
+          collisionIterations: 0,
+          continuousCollision: false,
+          maxCatchUpSteps: 1,
+          maxCollisionCandidates: 1,
+          substeps: 1,
+        },
+        speedLimit: 'unlimited',
+      })
+      backend.resetBody(id, new Float32Array([0, 1, 0, 1, 2, 0, 0, 0, 0]))
+
+      expect(sharedPositions![4]).toBe(beforeReset)
+      Atomics.store(signal!, 0, 1)
+      Atomics.notify(signal!, 0)
+      await pending
+      backend.dispose()
+    },
+  )
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'does not leak an id when both shared and fallback body sends fail',
+    () => {
+      let failFallback = true
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          if (command.sharedPositions != null) {
+            const error = new Error('Shared memory is blocked')
+            error.name = 'DataCloneError'
+            throw error
+          }
+          if (command.type === 'addBody' && failFallback) {
+            failFallback = false
+            throw new Error('Fallback body send failed')
+          }
+        },
+        terminate: vi.fn(),
+      }
+      const backend = new CPUBackend({ worker })
+      expect(() => backend.addBody({ mesh: triangle(), selfCollision: false })).toThrow('Fallback body send failed')
+      expect(() => backend.getPositions(1)).toThrow('Unknown cloth body 1')
+      expect(backend.addBody({ mesh: triangle(), selfCollision: false })).toBe(1)
+      backend.dispose()
+    },
+  )
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'removes a pending step when the transferable fallback send fails',
+    async () => {
+      let failFallback = true
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          if (command.type === 'step' && command.signal != null) {
+            const error = new Error('Shared memory is blocked')
+            error.name = 'DataCloneError'
+            throw error
+          }
+          if (command.type !== 'step')
+            return
+          if (failFallback) {
+            failFallback = false
+            throw new Error('Fallback step send failed')
+          }
+          const positions = triangle().positions
+          queueMicrotask(() => worker.onmessage?.({
+            data: { positions: [[1, positions]], requestId: command.requestId, type: 'step' },
+          }))
+        },
+        terminate: vi.fn(),
+      }
+      const backend = new CPUBackend({ worker })
+      backend.addBody({ mesh: triangle(), selfCollision: false })
+      const options = {
+        forceFields: [],
+        gravity: [0, 0, 0] as const,
+        quality: {
+          collisionEverySubsteps: 1,
+          collisionIterations: 0,
+          continuousCollision: false,
+          maxCatchUpSteps: 1,
+          maxCollisionCandidates: 1,
+          substeps: 1,
+        },
+        speedLimit: 'unlimited' as const,
+      }
+
+      await expect(backend.step(1 / 60, options)).rejects.toThrow('Fallback step send failed')
+      await expect(backend.step(1 / 60, options)).resolves.toBeUndefined()
+      backend.dispose()
+    },
+  )
+
+  it('falls back to Worker responses when shared memory is unavailable', async () => {
+    vi.stubGlobal('SharedArrayBuffer', undefined)
+    const messages: TestWorkerCommand[] = []
+    const worker: CPUWorkerLike = {
+      onerror: null,
+      onmessage: null,
+      postMessage: (message) => {
+        const command = message as TestWorkerCommand
+        messages.push(command)
+        if (command.type !== 'step')
+          return
+        if (command.requestId == null)
+          throw new Error('Expected a Worker step request id')
+        const positions = triangle().positions
+        positions[4] = 0.5
+        queueMicrotask(() => worker.onmessage?.({
+          data: {
+            positions: [[1, positions]],
+            requestId: command.requestId,
+            type: 'step',
+          },
+        }))
+      },
+      terminate: vi.fn(),
+    }
+    const backend = new CPUBackend({ worker })
+    const world = createClothWorld({ backend })
+    const body = world.addBody({ mesh: triangle(), selfCollision: false })
+
+    await world.step(1 / 60)
+
+    expect(messages.find(message => message.type === 'addBody')?.sharedPositions).toBeUndefined()
+    expect(messages.find(message => message.type === 'step')?.signal).toBeUndefined()
+    expect(world.getPositions(body)[4]).toBe(0.5)
+    world.dispose()
+  })
+
+  it.runIf(typeof SharedArrayBuffer !== 'undefined' && typeof Atomics.waitAsync === 'function')(
+    'falls back when the runtime rejects cloning shared memory',
+    async () => {
+      const messages: TestWorkerCommand[] = []
+      const worker: CPUWorkerLike = {
+        onerror: null,
+        onmessage: null,
+        postMessage: (message) => {
+          const command = message as TestWorkerCommand
+          messages.push(command)
+          if (command.sharedPositions != null) {
+            const error = new Error('Shared memory is blocked')
+            error.name = 'DataCloneError'
+            throw error
+          }
+          if (command.type !== 'step')
+            return
+          const positions = triangle().positions
+          positions[4] = 0.75
+          queueMicrotask(() => worker.onmessage?.({
+            data: {
+              positions: [[1, positions]],
+              requestId: command.requestId,
+              type: 'step',
+            },
+          }))
+        },
+        terminate: vi.fn(),
+      }
+      const world = createClothWorld({ backend: new CPUBackend({ worker }) })
+      const body = world.addBody({ mesh: triangle(), selfCollision: false })
+
+      await world.step(1 / 60)
+
+      expect(messages.filter(message => message.type === 'addBody')).toHaveLength(2)
+      expect(messages.at(-1)?.signal).toBeUndefined()
+      expect(world.getPositions(body)[4]).toBe(0.75)
+      world.dispose()
+    },
+  )
 
   it('uses the CPU backend unless a ClothBackend is injected', () => {
     const defaultWorld = createClothWorld()
